@@ -1,0 +1,26 @@
+<Project>
+    <!-- Deploy to both r2modman profiles on build -->
+
+    <!-- Default profile (for mod testing) -->
+    <PropertyGroup>
+        <PluginDir_Default>C:\Users\USER\AppData\Roaming\r2modmanPlus-local\LethalCompany\profiles\Default\BepInEx\plugins\Phoney\</PluginDir_Default>
+        <!-- Lethal11 profile (main play profile) -->
+        <PluginDir_Lethal11>C:\Users\USER\AppData\Roaming\r2modmanPlus-local\LethalCompany\profiles\Lethal11\BepInEx\plugins\Phoney\</PluginDir_Lethal11>
+    </PropertyGroup>
+
+    <Target Name="CopyFiles" AfterTargets="PostBuildEvent">
+        <MakeDir Directories="$(PluginDir_Default)" Condition="!Exists('$(PluginDir_Default)')" />
+        <MakeDir Directories="$(PluginDir_Lethal11)" Condition="!Exists('$(PluginDir_Lethal11)')" />
+        
+        <ItemGroup>
+            <PluginDlls Include="$(TargetPath)" />
+            <PluginDlls Include="$(MSBuildProjectDirectory)\lib\Whisper.net.dll" />
+            <NativeLibs Include="$(TargetDir)runtimes\**\*.*" />
+        </ItemGroup>
+
+        <Copy SourceFiles="@(PluginDlls)" DestinationFolder="$(PluginDir_Default)" SkipUnchangedFiles="true" ContinueOnError="true" />
+        <Copy SourceFiles="@(PluginDlls)" DestinationFolder="$(PluginDir_Lethal11)" SkipUnchangedFiles="true" ContinueOnError="true" />
+        <Copy SourceFiles="@(NativeLibs)" DestinationFolder="$(PluginDir_Default)runtimes\%(RecursiveDir)" Condition="'@(NativeLibs)' != ''" SkipUnchangedFiles="true" ContinueOnError="true" />
+        <Copy SourceFiles="@(NativeLibs)" DestinationFolder="$(PluginDir_Lethal11)runtimes\%(RecursiveDir)" Condition="'@(NativeLibs)' != ''" SkipUnchangedFiles="true" ContinueOnError="true" />
+    </Target>
+</Project>
