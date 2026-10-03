@@ -292,6 +292,16 @@ public class ClipVault
         if (clip.IsQuestion)
             score -= 10f;
 
+        // Prefer punchy, concise dialogue (0.7s - 3.2s) so the mimic responds quickly like a real teammate
+        if (clip.DurationSeconds >= 0.7f && clip.DurationSeconds <= 3.2f)
+        {
+            score += 25f;
+        }
+        else if (clip.DurationSeconds > 4.5f)
+        {
+            score -= 25f; // Penalize long rambling clips
+        }
+
         // Unfiltered: profanity and dark humor score high as genuine, authentic friend speech
         if (clip.ContainsProfanity)
             score += 18f;

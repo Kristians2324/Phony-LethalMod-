@@ -344,7 +344,12 @@ public class PhoneyBloodyReveal : MonoBehaviour
         bool isServer = Unity.Netcode.NetworkManager.Singleton?.IsServer == true || Unity.Netcode.NetworkManager.Singleton?.IsHost == true;
         if (isServer)
         {
-            if (!_masked.handsOut) { _masked.handsOut = true; _masked.SetHandsOutServerRpc(true); }
+            if (!_masked.handsOut)
+            {
+                _masked.handsOut = true;
+                _masked.SetHandsOutClientRpc(true);
+                if (_masked.creatureAnimator != null) _masked.creatureAnimator.SetBool("HandsOut", true);
+            }
             if (_masked.running)   { _masked.running  = false; _masked.SetRunningServerRpc(false); }
         }
 
@@ -469,7 +474,8 @@ public class PhoneyBloodyReveal : MonoBehaviour
         }
 
         CacheMaterials();
-        PhoneyPlugin.Logger.LogInfo($"[BloodyReveal] '{_masked.gameObject.name}' reset disguise.");
+        PhoneyPlugin.Logger.LogInfo(
+            $"[BloodyReveal] '{_masked.gameObject.name}' disguise reset: restored body materials, stopped blood particle, restored neck/spine rotations, and re-hid mask.");
     }
 
     private static Transform? FindBone(Transform root, string name)

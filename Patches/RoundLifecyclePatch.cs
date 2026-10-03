@@ -27,7 +27,9 @@ public class RoundLifecyclePatch
         AudioCaptureManager.Instance.Clear();
         Phoney.AI.MaskedScrapManager.GloballyProcessedScrapIds.Clear();
         Phoney.AI.MaskedScrapManager.TaintedScrapIds.Clear();
+        Phoney.AI.MaskedHeldItemManager.LastKnownPlayerEquipment.Clear();
     }
+
 
     [HarmonyPatch("StartGame")]
     [HarmonyPostfix]

@@ -180,7 +180,7 @@ public class DissonanceVoiceCaptureListener : IMicrophoneSubscriber
 
                 _silentSampleCount += buffer.Count;
 
-                int silenceLimitSamples = (sampleRate * channels) / 2; // 0.5s silence triggers dispatch
+                int silenceLimitSamples = (int)(sampleRate * channels * 0.28f); // 0.28s silence triggers immediate dispatch
                 int maxCapacitySamples = (sampleRate * channels) * 6;  // 6s max utterance
 
                 if (_silentSampleCount >= silenceLimitSamples || _sampleBuffer.Count >= maxCapacitySamples)

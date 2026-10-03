@@ -24,11 +24,17 @@ public class MaskedScrapManager : MonoBehaviour
     private MaskedPlayerEnemy? _masked;
     private Transform? _rightHandBone;
     private Transform? _beltBone;
+    private Transform? _chestBone;
+    private Transform? _heldItemAnchor;
+
+    public Transform? HeldItemAnchor => _heldItemAnchor;
 
     public readonly List<GrabbableObject> CarriedItems = new();
     public GrabbableObject? HeldScrap => CarriedItems.Count > 0 ? CarriedItems[0] : null;
     public bool HasHeldScrap => CarriedItems.Count > 0;
     public int CarriedCount => CarriedItems.Count;
+    public bool IsHoldingTwoHanded => HeldScrap?.itemProperties?.twoHanded == true;
+    public bool IsCarryingTwoHanded => CarriedItems.Any(i => i?.itemProperties?.twoHanded == true);
 
     /// <summary>
     /// Computes the mimic's total carried weight, mirroring vanilla Lethal Company mechanics.
@@ -57,12 +63,19 @@ public class MaskedScrapManager : MonoBehaviour
     /// </summary>
     public bool CanPickUpMoreScrap()
     {
-        int maxSlots = Mathf.Clamp(PhoneyPlugin.MaxCarriedScrapCount.Value, 1, 4);
-        if (CarriedItems.Count >= maxSlots) return false;
-
-        // If currently holding a two-handed item, cannot carry additional items
+        // If currently holding a two-handed item, hands are completely occupied - CANNOT pick up anything else!
         if (HeldScrap != null && HeldScrap.itemProperties != null && HeldScrap.itemProperties.twoHanded)
             return false;
+
+        // If any carried item is two-handed, inventory is locked to only that item
+        for (int i = 0; i < CarriedItems.Count; i++)
+        {
+            if (CarriedItems[i]?.itemProperties != null && CarriedItems[i].itemProperties.twoHanded)
+                return false;
+        }
+
+        int maxSlots = Mathf.Clamp(PhoneyPlugin.MaxCarriedScrapCount.Value, 1, 4);
+        if (CarriedItems.Count >= maxSlots) return false;
 
         return true;
     }
@@ -74,8 +87,33 @@ public class MaskedScrapManager : MonoBehaviour
     {
         _masked = masked;
         _rightHandBone = rightHandBone ?? FindHandBone(masked.transform);
+        if (_rightHandBone != null && !_rightHandBone.name.Equals("serverItemHolder", StringComparison.OrdinalIgnoreCase))
+        {
+            var childHolder = _rightHandBone.Find("serverItemHolder");
+            if (childHolder != null) _rightHandBone = childHolder;
+        }
         _beltBone = FindBeltBone(masked.transform);
-        PhoneyPlugin.Logger.LogInfo($"[ScrapManager] Initialized on '{masked.gameObject.name}'. RightHandBone={_rightHandBone?.name ?? "none"}, BeltBone={_beltBone?.name ?? "none"}");
+        _chestBone = FindChestBone(masked.transform);
+
+        if (_chestBone != null)
+        {
+            var anchor = new GameObject("[Phoney] HeldScrapAnchor");
+            anchor.transform.SetParent(_chestBone, false);
+            // Default position: held up in front of chest/chin at face level like a player
+            anchor.transform.localPosition = new Vector3(0.04f, 0.18f, 0.38f);
+            anchor.transform.localRotation = Quaternion.Euler(12f, 0f, 0f);
+            _heldItemAnchor = anchor.transform;
+        }
+
+        PhoneyPlugin.Logger.LogInfo($"[ScrapManager] Initialized on '{masked.gameObject.name}'. RightHandBone={_rightHandBone?.name ?? "none"}, BeltBone={_beltBone?.name ?? "none"}, ChestBone={_chestBone?.name ?? "none"}");
+    }
+
+    private static Transform? FindChestBone(Transform root)
+    {
+        return root.GetComponentsInChildren<Transform>(includeInactive: true)
+            .FirstOrDefault(t => t.name.Equals("spine.003", StringComparison.OrdinalIgnoreCase)
+                              || t.name.Equals("spine.002", StringComparison.OrdinalIgnoreCase)
+                              || t.name.Equals("chest", StringComparison.OrdinalIgnoreCase));
     }
 
     private static Transform? FindBeltBone(Transform root)
@@ -89,9 +127,38 @@ public class MaskedScrapManager : MonoBehaviour
     private static Transform? FindHandBone(Transform root)
     {
         return root.GetComponentsInChildren<Transform>(includeInactive: true)
-            .FirstOrDefault(t => t.name.Equals("serverItemHolder", StringComparison.OrdinalIgnoreCase)
-                              || t.name.Equals("hand.R", StringComparison.OrdinalIgnoreCase)
-                              || t.name.Equals("RightHand", StringComparison.OrdinalIgnoreCase));
+            .FirstOrDefault(t => t.name.Equals("serverItemHolder", StringComparison.OrdinalIgnoreCase))
+            ?? root.GetComponentsInChildren<Transform>(includeInactive: true)
+            .FirstOrDefault(t => t.name.Equals("hand.R", StringComparison.OrdinalIgnoreCase)
+                              || t.name.Equals("RightHand", StringComparison.OrdinalIgnoreCase)
+                              || t.name.Equals("RightHandSlot", StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
+    /// Multi-layer key detection: prevents mimics from ever targeting, picking up, or tainting keys.
+    /// Checks runtime type (KeyItem), type name, item name, and gameObject name for "key".
+    /// </summary>
+    public static bool IsKeyItem(GrabbableObject? item)
+    {
+        if (item == null) return false;
+
+        // Layer 1: Vanilla KeyItem class or any subclass
+        if (item is KeyItem) return true;
+
+        // Layer 2: Modded key types that don't inherit from KeyItem
+        string typeName = item.GetType().Name;
+        if (typeName.IndexOf("key", StringComparison.OrdinalIgnoreCase) >= 0) return true;
+
+        // Layer 3: Item properties name contains "key"
+        if (item.itemProperties != null &&
+            item.itemProperties.itemName != null &&
+            item.itemProperties.itemName.IndexOf("key", StringComparison.OrdinalIgnoreCase) >= 0)
+            return true;
+
+        // Layer 4: GameObject name contains "key"  
+        if (item.gameObject.name.IndexOf("key", StringComparison.OrdinalIgnoreCase) >= 0) return true;
+
+        return false;
     }
 
     /// <summary>
@@ -114,7 +181,7 @@ public class MaskedScrapManager : MonoBehaviour
                 foreach (var t in teleports)
                 {
                     if (t == null) continue;
-                    Vector3 doorPos = t.entrancePoint != null ? t.entrancePoint.position : t.transform.position;
+                    Vector3 doorPos = GetDoorPosition(t);
                     if (Vector3.Distance(position, doorPos) <= radius)
                         return true;
                 }
@@ -171,11 +238,16 @@ public class MaskedScrapManager : MonoBehaviour
 
     /// <summary>
     /// Gets the position of an EntranceTeleport door.
+    /// Prioritizes the actual interact trigger (door knob / handle) where players stand.
     /// </summary>
     public static Vector3 GetDoorPosition(EntranceTeleport? door)
     {
         if (door == null) return Vector3.zero;
-        return door.entrancePoint != null ? door.entrancePoint.position : door.transform.position;
+        if (door.triggerScript != null)
+            return door.triggerScript.transform.position;
+        if (door.entrancePoint != null)
+            return door.entrancePoint.position;
+        return door.transform.position;
     }
 
     /// <summary>
@@ -204,11 +276,19 @@ public class MaskedScrapManager : MonoBehaviour
             if (item.NetworkObject != null && GloballyProcessedScrapIds.Contains(item.NetworkObject.NetworkObjectId)) continue;
             if (_ignoredItems.Contains(item)) continue;
             if (item.itemProperties == null) continue;
-            // Real players pick up all scrap, keys, and tools
-            bool isScrapOrUseful = item.itemProperties.isScrap || 
-                                   item.itemProperties.itemName.Equals("Key", StringComparison.OrdinalIgnoreCase) ||
-                                   item.itemProperties.isConductiveMetal;
-            if (!isScrapOrUseful) continue;
+            // Only target actual scrap quota items — never touch keys!
+            if (!item.itemProperties.isScrap) continue;
+            if (IsKeyItem(item)) continue;
+
+            // Two-handed inventory rules (matching real player behavior):
+            // - If already carrying ANY item, skip two-handed items (can't carry both)
+            // - If holding a two-handed item, skip everything (hands are full)
+            if (CarriedItems.Count > 0)
+            {
+                if (item.itemProperties.twoHanded) continue; // Can't add a two-handed item on top
+                if (HeldScrap?.itemProperties?.twoHanded == true) continue; // Hands full with two-handed
+            }
+
             if (item.isHeld || item.isPocketed || item.deactivated || !item.grabbable) continue;
 
             // Ensure matching environment: inside facility vs exterior
@@ -232,6 +312,12 @@ public class MaskedScrapManager : MonoBehaviour
                 bestDist = d;
                 bestItem = item;
             }
+        }
+
+        if (bestItem != null)
+        {
+            PhoneyPlugin.Logger.LogInfo(
+                $"[ScrapManager] '{_masked.gameObject.name}' scan detected reachable scrap '{bestItem.itemProperties?.itemName ?? "Item"}' (${bestItem.scrapValue}) at {bestDist:F1}m (twoHanded: {bestItem.itemProperties?.twoHanded == true}).");
         }
 
         return bestItem;
@@ -267,7 +353,7 @@ public class MaskedScrapManager : MonoBehaviour
 
                 if (match != null)
                 {
-                    Vector3 doorPos = match.entrancePoint != null ? match.entrancePoint.position : match.transform.position;
+                    Vector3 doorPos = GetDoorPosition(match);
                     // Slightly offset from the door so loot isn't right on the trigger
                     return doorPos + match.transform.forward * 1.5f;
                 }
@@ -297,8 +383,24 @@ public class MaskedScrapManager : MonoBehaviour
         if (scrap.isHeld || scrap.isPocketed) return false;
         if (!CanPickUpMoreScrap()) return false;
 
-        // If carrying items already, cannot grab a two-handed item
+        // NEVER pick up keys — they are reserved for player facility access!
+        if (IsKeyItem(scrap))
+        {
+            string scrapName = scrap.itemProperties?.itemName ?? scrap.gameObject.name;
+            PhoneyPlugin.Logger.LogInfo(
+                $"[ScrapManager] '{_masked.gameObject.name}' refused to touch key '{scrapName}'. Keys are reserved for player facility access!");
+            return false;
+        }
+
+        // Only pick up real scrap quota items
+        if (scrap.itemProperties != null && !scrap.itemProperties.isScrap) return false;
+
+        // If carrying items already, cannot grab a two-handed item!
         if (CarriedItems.Count > 0 && scrap.itemProperties != null && scrap.itemProperties.twoHanded)
+            return false;
+
+        // If holding a two-handed item, cannot grab any more items!
+        if (HeldScrap != null && HeldScrap.itemProperties != null && HeldScrap.itemProperties.twoHanded)
             return false;
 
         ExecuteGrabLocally(scrap);
@@ -312,7 +414,8 @@ public class MaskedScrapManager : MonoBehaviour
                 TaintedScrapIds.Add(scrapNetId);
                 int reduction = Mathf.Max(1, PhoneyPlugin.MimicTouchValueReduction.Value);
                 int oldValue = scrap.scrapValue;
-                int newValue = scrap.scrapValue > 1 ? Mathf.Max(1, scrap.scrapValue - reduction) : scrap.scrapValue;
+                bool isScrap = scrap.itemProperties != null && scrap.itemProperties.isScrap;
+                int newValue = isScrap && scrap.scrapValue > 1 ? Mathf.Max(1, scrap.scrapValue - reduction) : scrap.scrapValue;
                 string originalName = scrap.itemProperties?.itemName ?? "Item";
                 string distortedName = GenerateDistortedName(originalName);
 
@@ -321,7 +424,7 @@ public class MaskedScrapManager : MonoBehaviour
                 PhoneyNetworkManager.Instance.BroadcastItemTaint(scrapNetId, newValue, distortedName);
 
                 PhoneyPlugin.Logger.LogInfo(
-                    $"[ScrapManager] Mimic touch corrupted item '{originalName}' -> '{distortedName}', value: ${oldValue} -> ${newValue} (loss: -${(scrap.scrapValue > 1 ? reduction : 0)})");
+                    $"[ScrapManager] Mimic touch corrupted item '{originalName}' -> '{distortedName}', value: ${oldValue} -> ${newValue} (loss: -${(isScrap && scrap.scrapValue > 1 ? reduction : 0)})");
             }
         }
 
@@ -333,8 +436,9 @@ public class MaskedScrapManager : MonoBehaviour
                 scrap.NetworkObject.NetworkObjectId);
         }
 
+        float extraLbs = (TotalCarryWeight - 1.0f) * 105f;
         PhoneyPlugin.Logger.LogInfo(
-            $"[ScrapManager] '{_masked.gameObject.name}' grabbed real scrap '{scrap.itemProperties?.itemName ?? "Item"}' (value: ${scrap.scrapValue}, carried: {CarriedItems.Count}, totalWeight: {TotalCarryWeight:F2})");
+            $"[ScrapManager] '{_masked.gameObject.name}' picked up real scrap '{scrap.itemProperties?.itemName ?? "Item"}' (Val: ${scrap.scrapValue}, Slot: {CarriedItems.Count}/{Mathf.Clamp(PhoneyPlugin.MaxCarriedScrapCount.Value, 1, 4)}, Weight: {TotalCarryWeight:F2}x [+{extraLbs:F0} lbs], TwoHanded: {scrap.itemProperties?.twoHanded == true}). Attached to chest anchor at chin/face level.");
 
         return true;
     }
@@ -368,11 +472,18 @@ public class MaskedScrapManager : MonoBehaviour
     /// <summary>
     /// Drops all carried scrap items in a neat grouping at the target floor position and syncs to all clients.
     /// </summary>
-    public void DropRealScrap(Vector3 targetFloorPos, bool isElevatorStaged = false)
+    public void DropRealScrap(Vector3 targetFloorPos, bool isElevatorStaged = false, bool isLadderStaged = false)
     {
         if (CarriedItems.Count == 0 || _masked == null) return;
 
+        bool inShip = StartOfRound.Instance != null && StartOfRound.Instance.shipBounds != null 
+                      && StartOfRound.Instance.shipBounds.bounds.Contains(targetFloorPos);
+        if (!inShip && IsNearShip(targetFloorPos, 5.0f)) inShip = true;
+
         var itemsToDrop = CarriedItems.ToList();
+        PhoneyPlugin.Logger.LogInfo(
+            $"[ScrapManager] '{_masked.gameObject.name}' dropping {itemsToDrop.Count} carried item(s) at {targetFloorPos} (isElevatorStaged={isElevatorStaged}, isLadderStaged={isLadderStaged}, inShip={inShip}).");
+
         for (int i = 0; i < itemsToDrop.Count; i++)
         {
             var scrap = itemsToDrop[i];
@@ -387,19 +498,20 @@ public class MaskedScrapManager : MonoBehaviour
                 itemFloorPos += spread;
             }
 
-            ExecuteDropLocally(scrap, itemFloorPos, isElevatorStaged);
+            ExecuteDropLocally(scrap, itemFloorPos, isElevatorStaged, isLadderStaged);
 
-            // Broadcast to clients
+            // Broadcast to clients (isElevatorStaged / isLadderStaged both indicate temporary staging)
             if (_masked.NetworkObject != null && scrap.NetworkObject != null)
             {
                 PhoneyNetworkManager.Instance.BroadcastItemDrop(
                     _masked.NetworkObject.NetworkObjectId,
                     scrap.NetworkObject.NetworkObjectId,
-                    itemFloorPos);
+                    itemFloorPos,
+                    isElevatorStaged || isLadderStaged);
             }
 
             PhoneyPlugin.Logger.LogInfo(
-                $"[ScrapManager] '{_masked.gameObject.name}' dropped real scrap '{scrap.itemProperties?.itemName ?? "Item"}' ({i + 1}/{itemsToDrop.Count}, isElevatorStaged={isElevatorStaged}).");
+                $"[ScrapManager] '{_masked.gameObject.name}' dropped real scrap '{scrap.itemProperties?.itemName ?? "Item"}' ({i + 1}/{itemsToDrop.Count}, isElevatorStaged={isElevatorStaged}, isLadderStaged={isLadderStaged}, inShip={inShip}).");
         }
 
         CarriedItems.Clear();
@@ -418,6 +530,54 @@ public class MaskedScrapManager : MonoBehaviour
 
     // ─── Local Execution (Shared by Host and Receiving Clients) ───────────────
 
+    /// <summary>
+    /// Attaches the primary held scrap item to the mimic's body.
+    /// One-handed items (like bottles, scrap) are parented to the right hand (_rightHandBone / serverItemHolder)
+    /// using official positionOffset and rotationOffset, matching real player hand grip.
+    /// Two-handed items (engines, axles, etc.) are parented to _heldItemAnchor in front of chest.
+    /// </summary>
+    private void AttachPrimaryItem(GrabbableObject scrap)
+    {
+        if (scrap == null) return;
+
+        bool twoHanded = scrap.itemProperties != null && scrap.itemProperties.twoHanded;
+
+        // In vanilla Lethal Company, all held items (one-handed and two-handed) are parented to serverItemHolder.
+        // The animator layers 'HoldingItemsBothHands' and 'HoldingItemsRightHand' position the arms correctly.
+        Transform holdBone = _rightHandBone ?? _heldItemAnchor ?? _chestBone ?? transform;
+
+        scrap.parentObject = holdBone;
+        scrap.transform.SetParent(holdBone, false);
+        scrap.hasHitGround = false;
+        scrap.isHeldByEnemy = true;
+        if (_masked != null)
+        {
+            scrap.GrabItemFromEnemy(_masked);
+        }
+        scrap.EnablePhysics(false);
+        scrap.isHeld = true;
+        scrap.isPocketed = false;
+        scrap.EnableItemMeshes(true);
+
+        if (scrap.itemProperties != null)
+        {
+            scrap.transform.localPosition = scrap.itemProperties.positionOffset;
+            scrap.transform.localRotation = Quaternion.Euler(scrap.itemProperties.rotationOffset);
+        }
+
+        // Hide visual tool while carrying real scrap so mimic never holds double items!
+        var holder = GetComponent<MaskedHeldItemHolder>();
+        if (holder != null)
+        {
+            holder.SetHeldToolActive(false);
+            holder.UpdateAnimationLayers(hasRealScrap: true, isAggressive: false);
+        }
+
+        PhoneyPlugin.Logger.LogInfo(
+            $"[ScrapManager] Attached primary item '{scrap.itemProperties?.itemName ?? "Item"}' to '{(holdBone != null ? holdBone.name : "null")}' (twoHanded={twoHanded}).");
+    }
+
+
     public void ExecuteGrabLocally(GrabbableObject scrap)
     {
         if (scrap == null) return;
@@ -425,24 +585,17 @@ public class MaskedScrapManager : MonoBehaviour
 
         if (CarriedItems[0] == scrap)
         {
-            // Primary item: hold in right hand
-            Transform holdBone = _rightHandBone ?? transform;
-            scrap.parentObject = holdBone;
-            scrap.hasHitGround = false;
-            if (_masked != null)
-            {
-                scrap.GrabItemFromEnemy(_masked);
-            }
-            scrap.EnablePhysics(false);
-            scrap.isHeld = true;
-            scrap.isPocketed = false;
+            AttachPrimaryItem(scrap);
         }
         else
         {
-            // Secondary items: pocket on hip / belt
+            // Secondary items: pocketed in inventory!
+            // In vanilla Lethal Company, pocketed items have their 3D meshes HIDDEN.
+            // They are NOT attached visibly to the belt (which would look glitched with multiple items sticking out).
             Transform beltBone = _beltBone ?? transform;
             scrap.parentObject = beltBone;
             scrap.hasHitGround = false;
+            scrap.isHeldByEnemy = true;
             if (_masked != null)
             {
                 scrap.GrabItemFromEnemy(_masked);
@@ -452,27 +605,40 @@ public class MaskedScrapManager : MonoBehaviour
             scrap.isPocketed = true;
             scrap.transform.SetParent(beltBone, false);
             scrap.transform.localPosition = Vector3.zero;
+            scrap.EnableItemMeshes(false); // CRITICAL: POCKETED ITEMS ARE INVISIBLE!
         }
     }
 
-    public void ExecuteDropLocally(GrabbableObject scrap, Vector3 targetFloorPos, bool isElevatorStaged = false)
+    public void ExecuteDropLocally(GrabbableObject scrap, Vector3 targetFloorPos, bool isElevatorStaged = false, bool isLadderStaged = false)
     {
         if (scrap == null) return;
         CarriedItems.Remove(scrap);
 
-        scrap.parentObject = null;
-        if (StartOfRound.Instance?.propsContainer != null)
+        // ── 1. Determine drop parent & elevator / ship region ──────────────────
+        bool inShip = StartOfRound.Instance != null && StartOfRound.Instance.shipBounds != null 
+                      && StartOfRound.Instance.shipBounds.bounds.Contains(targetFloorPos);
+        if (!inShip && IsNearShip(targetFloorPos, 5.0f)) inShip = true;
+
+        if (inShip && StartOfRound.Instance?.elevatorTransform != null)
         {
-            scrap.transform.SetParent(StartOfRound.Instance.propsContainer, true);
+            scrap.transform.SetParent(StartOfRound.Instance.elevatorTransform, true);
+            EnemyAI.SetItemInElevatorNonPlayer(true, true, scrap);
+        }
+        else if (isElevatorStaged && StartOfRound.Instance?.elevatorTransform != null)
+        {
+            scrap.transform.SetParent(StartOfRound.Instance.elevatorTransform, true);
+            EnemyAI.SetItemInElevatorNonPlayer(false, true, scrap);
+        }
+        else
+        {
+            if (StartOfRound.Instance?.propsContainer != null)
+            {
+                scrap.transform.SetParent(StartOfRound.Instance.propsContainer, true);
+            }
+            EnemyAI.SetItemInElevatorNonPlayer(false, false, scrap);
         }
 
-        scrap.EnablePhysics(true);
-        scrap.fallTime = 0f;
-        scrap.hasHitGround = false;
-        scrap.isHeld = false;
-        scrap.isPocketed = false;
-
-        // ── 1. Find exact physical floor surface via Raycast ──────────────────
+        // ── 2. Find exact physical floor surface via Raycast ──────────────────
         Vector3 floorPoint = targetFloorPos;
         Ray ray = new Ray(targetFloorPos + Vector3.up * 0.8f, Vector3.down);
         int layerMask = StartOfRound.Instance != null 
@@ -484,10 +650,24 @@ public class MaskedScrapManager : MonoBehaviour
             floorPoint = hit.point;
         }
 
-        // ── 2. Apply item vertical offset so model NEVER clips into floor ────
+        // ── 3. Apply item vertical offset so model NEVER clips into floor ────
         float vertOffset = scrap.itemProperties != null ? scrap.itemProperties.verticalOffset : 0.05f;
-        if (vertOffset < 0.04f) vertOffset = 0.06f; // Safe minimum clearance for items with zero or negative offset
+        if (vertOffset < 0.04f) vertOffset = 0.06f; // Safe minimum clearance
         Vector3 finalFloorPos = floorPoint + Vector3.up * vertOffset;
+
+        // ── 4. Full State Restoration (Mirroring BaboonBirdAI.DropScrap) ─────
+        scrap.parentObject = null;
+        scrap.isHeld = false;
+        scrap.isPocketed = false;
+        scrap.isHeldByEnemy = false;
+        scrap.grabbable = true;
+        scrap.deactivated = false;
+        scrap.hasHitGround = false;
+        scrap.fallTime = 0f;
+
+        scrap.EnablePhysics(true);
+        scrap.EnableItemMeshes(true);
+        scrap.transform.localScale = scrap.originalScale;
 
         Transform parentT = scrap.transform.parent;
         if (parentT != null)
@@ -505,15 +685,17 @@ public class MaskedScrapManager : MonoBehaviour
         scrap.floorYRot = UnityEngine.Random.Range(0, 360);
         scrap.DiscardItemFromEnemy();
 
-        // Ensure dropped scrap is properly tagged outside/inside so interior loot bugs cannot touch outside scrap
         if (_masked != null)
         {
             scrap.isInFactory = !_masked.isOutside;
-            scrap.isInElevator = IsNearShip(targetFloorPos) || isElevatorStaged;
         }
 
-        // Only add to GloballyProcessedScrapIds if not staged for moving up the elevator!
-        if (!isElevatorStaged)
+        PhoneyPlugin.Logger.LogInfo(
+            $"[ScrapManager] '{_masked?.gameObject.name}' placed '{scrap.itemProperties?.itemName ?? "Item"}' on floor at {finalFloorPos} (vertOffset: {vertOffset:F2}m, hitGround: {hit.collider != null}). Remaining inventory: {CarriedItems.Count}.");
+
+        // Only add to GloballyProcessedScrapIds if not staged for moving up the elevator or dropping at ladder!
+        bool isTemporarilyStaged = isElevatorStaged || isLadderStaged;
+        if (!isTemporarilyStaged)
         {
             if (scrap.NetworkObject != null)
             {
@@ -525,6 +707,72 @@ public class MaskedScrapManager : MonoBehaviour
                 _ignoredItems.Add(scrap);
             }
         }
+
+        // Promote next carried item to held hands/chest position
+        if (CarriedItems.Count > 0)
+        {
+            var nextPrimary = CarriedItems[0];
+            if (nextPrimary != null)
+            {
+                AttachPrimaryItem(nextPrimary);
+                PhoneyPlugin.Logger.LogInfo(
+                    $"[ScrapManager] Promoted next pocketed item '{nextPrimary.itemProperties?.itemName ?? "Item"}' to held position.");
+            }
+        }
+        else
+        {
+            // All scrap dropped! Restore visual held tool and animation layers
+            var holder = GetComponent<MaskedHeldItemHolder>();
+            if (holder != null)
+            {
+                holder.SetHeldToolActive(true);
+                holder.UpdateAnimationLayers(hasRealScrap: false, isAggressive: false);
+            }
+        }
+    }
+
+
+    /// <summary>
+    /// Cycles through carried inventory items, swapping which item is actively held in hands.
+    /// Only works if carrying multiple items and the current held item is NOT a two-handed item.
+    /// (Two-handed items occupy both hands and cannot be hotbar-cycled in vanilla Lethal Company).
+    /// </summary>
+    public bool CycleInventory()
+    {
+        if (CarriedItems.Count <= 1 || _masked == null) return false;
+
+        // Two-handed items cannot be cycled away from — player must hold it in both hands!
+        if (HeldScrap != null && HeldScrap.itemProperties != null && HeldScrap.itemProperties.twoHanded)
+            return false;
+
+        // Current primary item gets pocketed
+        var oldPrimary = CarriedItems[0];
+        CarriedItems.RemoveAt(0);
+        CarriedItems.Add(oldPrimary); // Move to back of inventory
+
+        // Hide old primary mesh and pocket it
+        if (oldPrimary != null)
+        {
+            oldPrimary.isPocketed = true;
+            Transform belt = _beltBone ?? transform;
+            oldPrimary.parentObject = belt;
+            oldPrimary.transform.SetParent(belt, false);
+            oldPrimary.transform.localPosition = Vector3.zero;
+            oldPrimary.EnableItemMeshes(false);
+        }
+
+        // New primary item gets held and displayed in hands
+        var newPrimary = CarriedItems[0];
+        if (newPrimary != null)
+        {
+            AttachPrimaryItem(newPrimary);
+
+            PhoneyPlugin.Logger.LogInfo(
+                $"[ScrapManager] '{_masked.gameObject.name}' cycled hotbar item -> now holding '{newPrimary.itemProperties?.itemName ?? "Item"}' ({CarriedItems.Count} total carried).");
+            return true;
+        }
+
+        return false;
     }
 
     /// <summary>
@@ -572,25 +820,22 @@ public class MaskedScrapManager : MonoBehaviour
     }
 
     /// <summary>
-    /// Applies scrap value reduction, cloned ScriptableObject name distortion, and scan node updates locally.
-    /// Safe for both server and receiving clients.
+    /// Applies scrap value reduction, HUD hover tooltip, and scan node updates locally.
+    /// Safe for both server and receiving clients without breaking ScriptableObject asset references.
     /// </summary>
     public static void ApplyTaintLocally(GrabbableObject scrap, int newValue, string distortedName)
     {
         if (scrap == null) return;
-
-        scrap.SetScrapValue(newValue);
 
         if (string.IsNullOrEmpty(distortedName))
         {
             distortedName = GenerateDistortedName(scrap.itemProperties?.itemName ?? "Item");
         }
 
-        // Isolate itemProperties ScriptableObject so only THIS item instance has its name changed
-        if (scrap.itemProperties != null)
+        bool isScrap = scrap.itemProperties != null && scrap.itemProperties.isScrap;
+        if (isScrap)
         {
-            scrap.itemProperties = UnityEngine.Object.Instantiate(scrap.itemProperties);
-            scrap.itemProperties.itemName = distortedName;
+            scrap.SetScrapValue(newValue);
         }
 
         var scanNodes = scrap.GetComponentsInChildren<ScanNodeProperties>();
@@ -601,8 +846,11 @@ public class MaskedScrapManager : MonoBehaviour
                 if (scanNode != null)
                 {
                     scanNode.headerText = distortedName;
-                    scanNode.scrapValue = newValue;
-                    scanNode.subText = $"Value: ${newValue}";
+                    if (isScrap)
+                    {
+                        scanNode.scrapValue = newValue;
+                        scanNode.subText = $"Value: ${newValue}";
+                    }
                 }
             }
         }

@@ -50,6 +50,7 @@ public class PhoneyPlugin : BaseUnityPlugin
     public static ConfigEntry<bool>  EnableDeceptiveAI       { get; private set; } = null!;
     public static ConfigEntry<float> AmbushDistanceThreshold { get; private set; } = null!;
     public static ConfigEntry<bool>  AllowTacticalRetreat    { get; private set; } = null!;
+    public static ConfigEntry<float> LostLineOfSightTimeout  { get; private set; } = null!;
     public static ConfigEntry<float> ParanoiaIntervalSeconds { get; private set; } = null!;
     public static ConfigEntry<float> InitialHostilityChance  { get; private set; } = null!;
     public static ConfigEntry<float> HostilityChanceIncrement{ get; private set; } = null!;
@@ -64,6 +65,8 @@ public class PhoneyPlugin : BaseUnityPlugin
     public static ConfigEntry<float> AmbushSprintSpeed              { get; private set; } = null!;
     public static ConfigEntry<float> AmbushJogSpeed                 { get; private set; } = null!;
     public static ConfigEntry<int>   MaxCarriedScrapCount           { get; private set; } = null!;
+    public static ConfigEntry<float> HaulToShipChance               { get; private set; } = null!;
+    public static ConfigEntry<float> HaulLootOutsideChance           { get; private set; } = null!;
 
     // ── Spawning ──────────────────────────────────────────────────────────────
     public static ConfigEntry<bool>  EnableCrossMoonSpawning { get; private set; } = null!;
@@ -97,6 +100,7 @@ public class PhoneyPlugin : BaseUnityPlugin
             Logger.LogInfo($"[STARTUP]   EnableBloodyReveal   = {EnableBloodyReveal.Value}");
             Logger.LogInfo($"[STARTUP]   EnableRevealSpasm    = {EnableRevealSpasm.Value}");
             Logger.LogInfo($"[STARTUP]   EnableHeldItems      = {EnableHeldItems.Value}");
+            Logger.LogInfo($"[STARTUP]   HaulLootOutsideChance= {HaulLootOutsideChance.Value:P0}");
             Logger.LogInfo($"[STARTUP]   HideMask             = {HideMask.Value}");
             Logger.LogInfo($"[STARTUP]   EnableCrossMoonSpawn = {EnableCrossMoonSpawning.Value}");
             Logger.LogInfo($"[STARTUP]   MaskedOnlySpawns     = {MaskedOnlySpawns.Value}");
@@ -248,20 +252,24 @@ public class PhoneyPlugin : BaseUnityPlugin
             "Overhaul Masked AI into a realistic deceptive crewmate that loots rooms, hauls scrap to entrance, and escalates paranoia.");
 
         AmbushDistanceThreshold = Config.Bind(
-            "DeceptiveAI", "AmbushDistanceThreshold", 3.0f,
-            "Distance in metres to trigger the violent bloody reveal once hostility is primed (default: 3.0m).");
+            "DeceptiveAI", "AmbushDistanceThreshold", 5.5f,
+            "Distance in metres for the mimic's active aggro range detection to trigger an ambush attack (default: 5.5m).");
 
         AllowTacticalRetreat = Config.Bind(
             "DeceptiveAI", "AllowTacticalRetreat", true,
             "Allow the mimic to flee into darkness and reset its disguise if a player escapes far away.");
+
+        LostLineOfSightTimeout = Config.Bind(
+            "DeceptiveAI", "LostLineOfSightTimeout", 7.0f,
+            "Duration in seconds of broken line of sight before an aggroed mimic gives up pursuit, runs back to the facility, and returns to normal (default: 7.0s).");
 
         ParanoiaIntervalSeconds = Config.Bind(
             "DeceptiveAI", "ParanoiaIntervalSeconds", 120.0f,
             "Interval in seconds (default: 120s / 2 minutes) for each paranoia hostility check.");
 
         InitialHostilityChance = Config.Bind(
-            "DeceptiveAI", "InitialHostilityChance", 0.20f,
-            "Base percentage chance (0.0 - 1.0) on the first 2-minute mark for the mimic to become hostile (default: 0.20 = 20%).");
+            "DeceptiveAI", "InitialHostilityChance", 0.25f,
+            "Base percentage chance (0.0 - 1.0) on the first 2-minute mark for the mimic to become hostile (default: 0.25 = 25%).");
 
         HostilityChanceIncrement = Config.Bind(
             "DeceptiveAI", "HostilityChanceIncrement", 0.25f,
@@ -302,16 +310,24 @@ public class PhoneyPlugin : BaseUnityPlugin
             "Average cooldown in seconds between pursuit demonic vocalizations during an ambush chase (default: 22.0s).");
 
         AmbushSprintSpeed = Config.Bind(
-            "DeceptiveAI", "AmbushSprintSpeed", 4.4f,
-            "Sprint speed of the mimic during ambush pursuit (default: 4.4f, matching unencumbered player sprint speed).");
+            "DeceptiveAI", "AmbushSprintSpeed", 4.95f,
+            "Sprint speed of the mimic during ambush pursuit (default: 4.95f).");
 
         AmbushJogSpeed = Config.Bind(
-            "DeceptiveAI", "AmbushJogSpeed", 2.5f,
-            "Reaction-window jog speed during ambush (default: 2.5f, slightly faster than player walk speed).");
+            "DeceptiveAI", "AmbushJogSpeed", 2.95f,
+            "Reaction-window jog speed during ambush (default: 2.95f).");
 
         MaxCarriedScrapCount = Config.Bind(
             "DeceptiveAI", "MaxCarriedScrapCount", 4,
             "Maximum number of scrap items the mimic can carry simultaneously (default: 4, matching player inventory slots).");
+
+        HaulToShipChance = Config.Bind(
+            "DeceptiveAI", "HaulToShipChance", 0.15f,
+            "Chance (0.0 to 1.0) that a mimic hauling loot outside takes it all the way to the Ship rather than dropping near the entrance door (default: 0.15).");
+
+        HaulLootOutsideChance = Config.Bind(
+            "DeceptiveAI", "HaulLootOutsideChance", 0.15f,
+            "Chance (0.0 to 1.0) that a mimic carrying loot inside the facility decides to take it outside rather than staying inside near the player (default: 0.15 = 15%).");
 
         EnableCrossMoonSpawning = Config.Bind(
             "Spawning", "EnableCrossMoonSpawning", true,
@@ -389,7 +405,12 @@ public class PhoneyPlugin : BaseUnityPlugin
     private void Update()
     {
         MainThreadDispatcher.DrainQueue();
+        if (EnableHeldItems.Value)
+        {
+            AI.MaskedHeldItemManager.TrackAllLivingPlayers();
+        }
     }
+
 
     private void OnDestroy()
     {

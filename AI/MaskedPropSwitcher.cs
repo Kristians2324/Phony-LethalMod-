@@ -130,11 +130,19 @@ public class MaskedPropSwitcher : MonoBehaviour
         _scrapProp = MaskedHeldItemManager.MakeVisualProp(scrapItem, isFlashlight: false);
         if (_scrapProp != null)
         {
-            _scrapProp.transform.SetParent(_rightHandBone, worldPositionStays: false);
-            // Hold slightly in front and angled — "two-handed carry" pose look
-            _scrapProp.transform.localPosition = new Vector3(0f, 0.05f, 0.10f);
-            _scrapProp.transform.localRotation = Quaternion.Euler(30f, 0f, 0f);
-            _scrapProp.transform.localScale    = Vector3.one * PhoneyPlugin.HeldItemScrapScale.Value;
+            Transform holdAnchor = _scrapManager?.HeldItemAnchor ?? _rightHandBone;
+            _scrapProp.transform.SetParent(holdAnchor, worldPositionStays: false);
+            if (holdAnchor == _scrapManager?.HeldItemAnchor)
+            {
+                _scrapProp.transform.localPosition = Vector3.zero;
+                _scrapProp.transform.localRotation = Quaternion.identity;
+            }
+            else
+            {
+                _scrapProp.transform.localPosition = new Vector3(0f, 0.05f, 0.10f);
+                _scrapProp.transform.localRotation = Quaternion.Euler(30f, 0f, 0f);
+            }
+            _scrapProp.transform.localScale = Vector3.one * PhoneyPlugin.HeldItemScrapScale.Value;
 
             PhoneyPlugin.Logger.LogInfo(
                 $"[PropSwitcher] '{_masked?.gameObject.name}' picked up: {scrapItem.itemName}");
@@ -172,7 +180,10 @@ public class MaskedPropSwitcher : MonoBehaviour
     {
         if (_flashlightProp != null)
             _flashlightProp.SetActive(on);
+        var holder = _masked?.GetComponent<MaskedHeldItemHolder>();
+        holder?.SetHeldToolActive(on);
     }
+
 
     private void ScheduleNextSwitch()
     {

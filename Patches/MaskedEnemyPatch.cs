@@ -116,8 +116,8 @@ public class MaskedEnemyPatch
 
         // ── 6. Held props & Scrap Manager ──────────────────────────────────────
         PhoneyPlugin.Logger.LogInfo($"[MaskedPatch] Step 6: EnableHeldItems = {PhoneyPlugin.EnableHeldItems.Value}...");
-        var (flashlightProp, rightHandBone) = MaskedHeldItemManager.TryEquipItems(__instance, targetPlayer);
-        PhoneyPlugin.Logger.LogInfo($"[MaskedPatch]   flashlightProp={(flashlightProp != null ? flashlightProp.name : "none")} rightHandBone={(rightHandBone != null ? rightHandBone.name : "none")}");
+        var (holder, rightHandBone) = MaskedHeldItemManager.TryEquipItems(__instance, targetPlayer);
+        PhoneyPlugin.Logger.LogInfo($"[MaskedPatch]   holder={(holder != null ? "created" : "none")} rightHandBone={(rightHandBone != null ? rightHandBone.name : "none")}");
 
         var scrapManager = __instance.gameObject.GetComponent<MaskedScrapManager>()
                            ?? __instance.gameObject.AddComponent<MaskedScrapManager>();
@@ -152,9 +152,10 @@ public class MaskedEnemyPatch
             PhoneyPlugin.Logger.LogInfo("[MaskedPatch] Step 9: Attaching MaskedPropSwitcher...");
             var switcher = __instance.gameObject.GetComponent<MaskedPropSwitcher>()
                            ?? __instance.gameObject.AddComponent<MaskedPropSwitcher>();
-            switcher.Initialize(__instance, deceptiveAI, flashlightProp, rightHandBone);
+            switcher.Initialize(__instance, deceptiveAI, holder?.HeldToolProp, rightHandBone);
             PhoneyPlugin.Logger.LogInfo("[MaskedPatch]   MaskedPropSwitcher attached.");
         }
+
 
         // ── 10. VR deception ───────────────────────────────────────────────────
         PhoneyPlugin.Logger.LogInfo($"[MaskedPatch] Step 10: VRFriendlyDeception = {PhoneyPlugin.VRFriendlyDeception.Value}...");
@@ -164,6 +165,16 @@ public class MaskedEnemyPatch
                               ?? __instance.gameObject.AddComponent<VRDeceptionBehaviour>();
             vrBehaviour.Initialize(__instance);
             PhoneyPlugin.Logger.LogInfo("[MaskedPatch]   VRDeceptionBehaviour attached.");
+        }
+
+        __instance.handsOut = false;
+        if (__instance.creatureAnimator != null)
+        {
+            __instance.creatureAnimator.SetBool("HandsOut", false);
+        }
+        if (NetworkManager.Singleton?.IsServer == true || NetworkManager.Singleton?.IsHost == true)
+        {
+            __instance.SetHandsOutClientRpc(false);
         }
 
         PhoneyPlugin.Logger.LogInfo($"[MaskedPatch] SETUP COMPLETE for '{__instance.gameObject.name}' → impersonating '{targetPlayer.playerUsername}'");
@@ -182,9 +193,20 @@ public class MaskedEnemyPatch
 
         // State 0 is standard movement. Prevent vanilla State 1 (stopAndStareTimer)
         // from zeroing agent speed every frame, and prevent State 2 from causing
-        // the mimic to abandon players and walk outside to hide in the ship.
+        // the mimic to abandon players and walk outside to hide in the ship next to the terminal.
         __instance.stopAndStareTimer = -999f;
+        __instance.interestInShipCooldown = -9999f;
         __instance.currentBehaviourStateIndex = 0;
+        __instance.previousBehaviourState = 0;
+
+        if (ai.CurrentPhase != MimicPhase.AmbushStrike || ai.IsUsingDoor)
+        {
+            __instance.handsOut = false;
+            if (__instance.stareAtTransform != null)
+            {
+                __instance.stareAtTransform = null;
+            }
+        }
 
         if (ai.CurrentPhase == MimicPhase.AmbushStrike)
         {
@@ -207,7 +229,125 @@ public class MaskedEnemyPatch
         if (ai != null)
         {
             ai.EnforceHumanSpeedAndMovement();
+
+            if (ai.IsUsingDoor && __instance.stareAtTransform != null)
+            {
+                __instance.stareAtTransform = null;
+            }
+
+            // Clear vanilla crouching if the mimic is not performing a deceptive crouch greeting or scrap pickup.
+            // Vanilla State 2 sets crouching = true when near insideShipPositions, freezing the mimic next to the terminal.
+            // Undercover mimics must NEVER crouch inside or near the ship.
+            bool nearShip = MaskedScrapManager.IsNearShip(__instance.transform.position, 8.0f)
+                || (StartOfRound.Instance?.shipBounds != null && StartOfRound.Instance.shipBounds.bounds.Contains(__instance.transform.position));
+            if ((!ai.IsPerformingFriendlyCrouch || nearShip) && __instance.crouching)
+            {
+                __instance.crouching = false;
+                if (NetworkManager.Singleton?.IsServer == true || NetworkManager.Singleton?.IsHost == true)
+                {
+                    __instance.SetCrouchingServerRpc(false);
+                }
+            }
+
+            // Synchronize authentic player holding animation layers & eliminate zombie arms
+            var holder = __instance.GetComponent<MaskedHeldItemHolder>();
+            var scrapManager = __instance.GetComponent<MaskedScrapManager>();
+            bool hasRealScrap = scrapManager != null && scrapManager.HasHeldScrap;
+            bool isAggressive = ai.CurrentPhase == MimicPhase.AmbushStrike;
+            if (holder != null)
+            {
+                holder.UpdateAnimationLayers(hasRealScrap, isAggressive);
+            }
+            else if (!isAggressive)
+            {
+                __instance.handsOut = false;
+                if (__instance.creatureAnimator != null)
+                {
+                    __instance.creatureAnimator.SetBool("HandsOut", false);
+                }
+            }
         }
+    }
+
+    // ─── LookAtFocusedPosition ────────────────────────────────────────────────
+
+    [HarmonyPatch("LookAtFocusedPosition")]
+    [HarmonyPrefix]
+    private static bool LookAtFocusedPositionPrefix(MaskedPlayerEnemy __instance)
+    {
+        if (__instance == null || !PhoneyPlugin.EnableDeceptiveAI.Value) return true;
+        var ai = __instance.gameObject.GetComponent<PhoneyDeceptiveAI>();
+        if (ai == null) return true;
+
+        // 1. Strict Door Gaze Lock: While using a door, keep body and head gaze locked on the door trigger!
+        // Never allow vanilla head-tracking or stareAtTransform to turn the mimic toward nearby players.
+        if (ai.IsUsingDoor && ai.DoorInteractionTarget != Vector3.zero)
+        {
+            __instance.stareAtTransform = null;
+            if (__instance.agent != null)
+            {
+                __instance.agent.angularSpeed = 0f;
+            }
+
+            Vector3 target = ai.DoorInteractionTarget;
+            Vector3 bodyDir = (target - __instance.transform.position).normalized;
+            bodyDir.y = 0;
+            if (bodyDir != Vector3.zero)
+            {
+                __instance.transform.rotation = Quaternion.LookRotation(bodyDir);
+                __instance.transform.eulerAngles = new Vector3(0f, __instance.transform.eulerAngles.y, 0f);
+            }
+
+            if (__instance.headTiltTarget != null)
+            {
+                __instance.headTiltTarget.LookAt(target);
+                __instance.headTiltTarget.localEulerAngles = new Vector3(__instance.headTiltTarget.localEulerAngles.x, 0f, 0f);
+            }
+            return false;
+        }
+
+        // 2. Clear vanilla's persistent stareAtTransform in non-aggressive phases so mimic doesn't zombie-stare
+        if (ai.CurrentPhase != MimicPhase.AmbushStrike && __instance.stareAtTransform != null)
+        {
+            __instance.stareAtTransform = null;
+        }
+
+        return true;
+    }
+
+    // ─── LookAtPlayerClientRpc ────────────────────────────────────────────────
+
+    [HarmonyPatch("LookAtPlayerClientRpc")]
+    [HarmonyPrefix]
+    private static bool LookAtPlayerClientRpcPrefix(MaskedPlayerEnemy __instance)
+    {
+        if (__instance == null || !PhoneyPlugin.EnableDeceptiveAI.Value) return true;
+        var ai = __instance.gameObject.GetComponent<PhoneyDeceptiveAI>();
+        if (ai == null) return true;
+
+        // Suppress client RPC from forcing stareAtTransform when undercover or using doors
+        if (ai.IsUsingDoor || ai.CurrentPhase != MimicPhase.AmbushStrike)
+        {
+            return false;
+        }
+        return true;
+    }
+
+
+    // ─── ChooseShipHidingSpot ─────────────────────────────────────────────────
+
+    [HarmonyPatch("ChooseShipHidingSpot")]
+    [HarmonyPrefix]
+    private static bool ChooseShipHidingSpotPrefix(MaskedPlayerEnemy __instance)
+    {
+        // When DeceptiveAI is enabled, completely block vanilla ship hiding behavior.
+        // Vanilla ChooseShipHidingSpot linecasts from ship door and sets destination to insideShipPositions
+        // right behind the terminal, freezing the mimic in a permanent crouch there.
+        if (__instance != null && PhoneyPlugin.EnableDeceptiveAI.Value)
+        {
+            return false;
+        }
+        return true;
     }
 
     // ─── DoAIInterval ─────────────────────────────────────────────────────────
@@ -310,7 +450,8 @@ public class MaskedEnemyPatch
     private static void KillEnemyPrefix(MaskedPlayerEnemy __instance)
     {
         if (__instance == null) return;
-        PhoneyPlugin.Logger.LogInfo($"[MaskedPatch] KillEnemy on '{__instance.gameObject.name}' — unregistering emitter and dropping scrap.");
+        PhoneyPlugin.Logger.LogInfo($"[MaskedPatch] KillEnemy on '{__instance.gameObject.name}' — unregistering emitter, destroying visual props, and dropping scrap.");
+        __instance.GetComponent<MaskedHeldItemHolder>()?.DestroyAllProps();
         __instance.GetComponent<MaskedScrapManager>()?.DropHeldScrapImmediately();
         var emitter = __instance.gameObject.GetComponent<PhoneyVoiceEmitter>();
         if (emitter != null)
@@ -320,6 +461,7 @@ public class MaskedEnemyPatch
             AudioCaptureManager.Instance.UnregisterEmitter(emitter);
         }
     }
+
 
     // ─── Mask hiding ─────────────────────────────────────────────────────────
 

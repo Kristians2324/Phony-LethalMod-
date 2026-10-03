@@ -45,3 +45,4 @@ c:\Users\USER\Documents\Lethal mods\Phoney\bin\Release\netstandard2.1\com.user.p
 c:\Users\USER\Documents\Lethal mods\Phoney\bin\Release\netstandard2.1\Whisper.net.dll
 c:\Users\USER\Documents\Lethal mods\Phoney\obj\Release\netstandard2.1\Phoney.csproj.Up2Date
 c:\Users\USER\Documents\Lethal mods\Phoney\obj\Release\netstandard2.1\com.user.phoney.dll
+c:\Users\USER\Documents\Lethal mods\Phoney\obj\Release\netstandard2.1\Phoney.sourcelink.json

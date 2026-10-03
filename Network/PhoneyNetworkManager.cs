@@ -210,22 +210,23 @@ public class PhoneyNetworkManager
         PhoneyPlugin.Logger.LogDebug($"[Network] Broadcasted item-grab: enemy={enemyNetId} item={itemNetId}");
     }
 
-    public void BroadcastItemDrop(ulong enemyNetId, ulong itemNetId, Vector3 dropPos)
+    public void BroadcastItemDrop(ulong enemyNetId, ulong itemNetId, Vector3 dropPos, bool isElevatorStaged = false)
     {
         var nm = NetworkManager.Singleton;
         if (nm == null || nm.CustomMessagingManager == null) return;
         if (!nm.IsServer && !nm.IsHost) return;
 
-        const int bufferSize = sizeof(ulong) + sizeof(ulong) + sizeof(float) * 3;
+        const int bufferSize = sizeof(ulong) + sizeof(ulong) + sizeof(float) * 3 + sizeof(bool);
         using var writer = new FastBufferWriter(bufferSize, Allocator.Temp);
         writer.WriteValueSafe(enemyNetId);
         writer.WriteValueSafe(itemNetId);
         writer.WriteValueSafe(dropPos.x);
         writer.WriteValueSafe(dropPos.y);
         writer.WriteValueSafe(dropPos.z);
+        writer.WriteValueSafe(isElevatorStaged);
 
         nm.CustomMessagingManager.SendNamedMessageToAll(ItemDropMessageName, writer);
-        PhoneyPlugin.Logger.LogDebug($"[Network] Broadcasted item-drop: enemy={enemyNetId} item={itemNetId} pos={dropPos}");
+        PhoneyPlugin.Logger.LogDebug($"[Network] Broadcasted item-drop: enemy={enemyNetId} item={itemNetId} pos={dropPos} staged={isElevatorStaged}");
     }
 
     private void OnReceiveItemGrabMessage(ulong senderClientId, FastBufferReader reader)
@@ -253,14 +254,20 @@ public class PhoneyNetworkManager
 
     private void OnReceiveItemDropMessage(ulong senderClientId, FastBufferReader reader)
     {
-        const int size = sizeof(ulong) + sizeof(ulong) + sizeof(float) * 3;
-        if (!reader.TryBeginRead(size)) return;
+        const int minSize = sizeof(ulong) + sizeof(ulong) + sizeof(float) * 3;
+        if (!reader.TryBeginRead(minSize)) return;
 
         reader.ReadValueSafe(out ulong enemyNetId);
         reader.ReadValueSafe(out ulong itemNetId);
         reader.ReadValueSafe(out float x);
         reader.ReadValueSafe(out float y);
         reader.ReadValueSafe(out float z);
+
+        bool isElevatorStaged = false;
+        if (reader.Length > minSize)
+        {
+            reader.ReadValueSafe(out isElevatorStaged);
+        }
 
         var nm = NetworkManager.Singleton;
         if (nm == null) return;
@@ -272,7 +279,7 @@ public class PhoneyNetworkManager
             var grabbable = itemObj.GetComponent<GrabbableObject>();
             if (scrapManager != null && grabbable != null)
             {
-                scrapManager.ExecuteDropLocally(grabbable, new Vector3(x, y, z));
+                scrapManager.ExecuteDropLocally(grabbable, new Vector3(x, y, z), isElevatorStaged);
             }
         }
     }

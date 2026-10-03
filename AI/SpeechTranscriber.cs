@@ -65,9 +65,10 @@ public class SpeechTranscriber : IDisposable
                 {
                     PhoneyPlugin.Logger.LogInfo($"[Transcriber] Loading Whisper model from: {_modelPath}");
                     _factory = WhisperFactory.FromPath(_modelPath);
+                    int threadCount = Math.Max(2, Math.Min(4, Environment.ProcessorCount / 2));
                     _processor = _factory.CreateBuilder()
                         .WithLanguage("en")
-                        .WithThreads(2)
+                        .WithThreads(threadCount)
                         .Build();
                     _isInitialized = true;
                     PhoneyPlugin.Logger.LogInfo("[Transcriber] Whisper AI model initialized successfully!");

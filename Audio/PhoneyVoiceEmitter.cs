@@ -115,6 +115,9 @@ public class PhoneyVoiceEmitter : MonoBehaviour
         _isDemonicMode = enabled && PhoneyPlugin.EnableDemonicAttackVoice.Value;
         ApplyDemonicEffects(_isDemonicMode);
 
+        PhoneyPlugin.Logger.LogInfo(
+            $"[VoiceEmitter] Demonic voice mode toggled: enabled={_isDemonicMode} (pitch={_voiceAudioSource?.pitch:F2}, distortion={_distortionFilter?.distortionLevel:F2}).");
+
         if (syncToNetwork && MaskedEnemy != null)
         {
             var nm = NetworkManager.Singleton;
@@ -244,17 +247,21 @@ public class PhoneyVoiceEmitter : MonoBehaviour
             return;
         }
 
-        // ── 1. Voice Accusation / Discovery Check ──────────────────────────────
+        // ── 1. Unified Speech Evaluation (Accusation Check + Response Selection) ──
+        var decision = DialogueBrain.Instance.EvaluateSpeech(
+            ImpersonatedSteamId,
+            transcript,
+            PhoneyPlugin.EnableUnfilteredBanter.Value);
+
         // If a nearby player calls out or exposes the mimic ("that guy's a mimic", "he's a mimic", "are you a mimic?"),
         // the mimic's cover is blown! It cuts off any friendly speech and immediately launches an ambush!
-        if (PhoneyPlugin.EnableVoiceAccusationAggression.Value &&
-            MimicDiscoveryDetector.IsExposingOrAccusingMimic(transcript, out string matchedReason))
+        if (PhoneyPlugin.EnableVoiceAccusationAggression.Value && decision.IsAccusation)
         {
             var ai = GetComponent<PhoneyDeceptiveAI>();
             if (ai != null)
             {
                 PhoneyPlugin.Logger.LogInfo(
-                    $"[VoiceEmitter] ⚠️ MIMIC COVER BLOWN! '{speakingPlayer.playerUsername}' called out: \"{transcript}\" (Matched: \"{matchedReason}\")! '{MaskedEnemy.gameObject.name}' triggering instant aggression on '{speakingPlayer.playerUsername}'!");
+                    $"[VoiceEmitter] ⚠️ MIMIC COVER BLOWN! '{speakingPlayer.playerUsername}' called out: \"{transcript}\" (Matched: \"{decision.MatchedAccusation}\")! '{MaskedEnemy.gameObject.name}' triggering instant aggression on '{speakingPlayer.playerUsername}'!");
 
                 // Cut off any active speech audio immediately
                 if (_voiceAudioSource != null && _voiceAudioSource.isPlaying)
@@ -287,27 +294,21 @@ public class PhoneyVoiceEmitter : MonoBehaviour
             return;
         }
 
-        PhoneyPlugin.Logger.LogInfo($"[VoiceEmitter]   Player in range ({dist:F1}m). Querying DialogueBrain...");
-
-        var clip = DialogueBrain.Instance.ChooseResponse(
-            ImpersonatedSteamId,
-            transcript,
-            PhoneyPlugin.EnableUnfilteredBanter.Value,
-            out float hesitationDelay);
+        var clip = decision.ResponseClip;
 
         if (clip != null)
         {
-            PhoneyPlugin.Logger.LogInfo($"[VoiceEmitter]   DialogueBrain chose clip: \"{clip.Transcript}\" (delay={hesitationDelay:F2}s)");
-            // Conversational rhythm: reply immediately and only once, with a natural 3s pause after speaking
-            _reactiveSpeechCooldown = Time.time + clip.DurationSeconds + hesitationDelay + 3.0f;
+            PhoneyPlugin.Logger.LogInfo($"[VoiceEmitter]   DialogueBrain chose clip: \"{clip.Transcript}\" (delay={decision.ResponseDelay:F2}s)");
+            // Conversational rhythm: reply immediately with a natural 2.5s pause after speaking
+            _reactiveSpeechCooldown = Time.time + clip.DurationSeconds + decision.ResponseDelay + 2.5f;
             _nextProactiveChatTime = Time.time + 35f;
             ClipVault.Instance.RecordClipPlayed(clip);
-            TriggerClip(clip, hesitationDelay);
+            TriggerClip(clip, decision.ResponseDelay);
         }
         else
         {
             PhoneyPlugin.Logger.LogInfo("[VoiceEmitter]   DialogueBrain returned NULL — acknowledging with silent gesture.");
-            _reactiveSpeechCooldown = Time.time + 3.0f;
+            _reactiveSpeechCooldown = Time.time + 2.5f;
 
             var ai = GetComponent<PhoneyDeceptiveAI>();
             if (ai != null)
@@ -345,7 +346,21 @@ public class PhoneyVoiceEmitter : MonoBehaviour
             yield break;
         }
 
-        AudioClip? unityClip = clip.GetOrCreateAudioClip();
+        AudioClip? unityClip;
+        AudioClip? reversedClip = null;
+
+        if (_isDemonicMode)
+        {
+            // CRYPTID EFFECT: Reverse the audio samples so speech plays backwards!
+            // Combined with pitch-down + distortion + echo, this sounds terrifyingly inhuman.
+            reversedClip = CreateReversedClip(clip);
+            unityClip = reversedClip ?? clip.GetOrCreateAudioClip();
+        }
+        else
+        {
+            unityClip = clip.GetOrCreateAudioClip();
+        }
+
         if (_voiceAudioSource != null && unityClip != null)
         {
             ApplyDemonicEffects(_isDemonicMode);
@@ -368,7 +383,7 @@ public class PhoneyVoiceEmitter : MonoBehaviour
             _voiceAudioSource.Play();
 
             PhoneyPlugin.Logger.LogInfo(
-                $"[VoiceEmitter] [{(fromNetwork ? "CLIENT" : "HOST")}] Masked as '{ImpersonatedPlayerName}' {(_isDemonicMode ? "[DEMONIC]" : "[NORMAL]")}: \"{clip.Transcript}\" [{clip.DurationSeconds:F1}s]");
+                $"[VoiceEmitter] [{(fromNetwork ? "CLIENT" : "HOST")}] Masked as '{ImpersonatedPlayerName}' {(_isDemonicMode ? "[DEMONIC-REVERSED]" : "[NORMAL]")}: \"{clip.Transcript}\" [{clip.DurationSeconds:F1}s]");
 
             // Wait for clip duration (pitch affects playback speed!)
             float actualDuration = clip.DurationSeconds / Mathf.Max(0.2f, _voiceAudioSource.pitch);
@@ -379,8 +394,65 @@ public class PhoneyVoiceEmitter : MonoBehaviour
                 _voiceAudioSource.Stop();
                 _voiceAudioSource.clip = null;
             }
+
+            // Clean up the temporary reversed clip to avoid memory leaks
+            if (reversedClip != null)
+            {
+                Object.Destroy(reversedClip);
+            }
         }
 
         _isSpeaking = false;
+    }
+
+    // ─── Reversed Audio Helper (Cryptid Backwards Speech) ────────────────────
+
+    /// <summary>
+    /// Creates a new AudioClip with the audio samples played in reverse.
+    /// For multi-channel audio, reverses entire frames (not individual samples)
+    /// to keep L/R channel pairing correct.
+    /// </summary>
+    private static AudioClip? CreateReversedClip(RecordedClip clip)
+    {
+        if (clip.AudioSamples == null || clip.AudioSamples.Length == 0) return null;
+
+        try
+        {
+            float[] original = clip.AudioSamples;
+            int channels = System.Math.Max(1, clip.Channels);
+            int totalSamples = original.Length;
+            int frameCount = totalSamples / channels;
+
+            float[] reversed = new float[totalSamples];
+
+            // Reverse frame-by-frame (each frame = channels samples)
+            // so stereo L/R pairs stay correctly paired
+            for (int f = 0; f < frameCount; f++)
+            {
+                int srcFrame = frameCount - 1 - f;
+                for (int c = 0; c < channels; c++)
+                {
+                    reversed[f * channels + c] = original[srcFrame * channels + c];
+                }
+            }
+
+            var reversedAudioClip = AudioClip.Create(
+                $"Phoney_Reversed_{clip.ClipId[..6]}",
+                frameCount,
+                channels,
+                clip.SampleRate,
+                false);
+            reversedAudioClip.SetData(reversed, 0);
+
+            PhoneyPlugin.Logger.LogInfo(
+                $"[VoiceEmitter] Created reversed audio clip ({frameCount} frames, {channels}ch, {clip.SampleRate}Hz) for cryptid effect.");
+
+            return reversedAudioClip;
+        }
+        catch (System.Exception ex)
+        {
+            PhoneyPlugin.Logger.LogWarning($"[VoiceEmitter] Failed to create reversed clip: {ex.Message}. Falling back to forward playback.");
+            return null;
+        }
     }
 }
