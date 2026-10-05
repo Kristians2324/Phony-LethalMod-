@@ -29,6 +29,8 @@ public class PhoneyNetworkManager
     private const string ItemValueMessageName = "Phoney_ItemValueSync_v1";
     private const string DemonicSyncMessageName = "Phoney_DemonicSync_v1";
     private const string DoorSyncMessageName = "Phoney_DoorSync_v1";
+    private const string ItemCycleMessageName = "Phoney_ItemCycleSync_v1";
+    private const string LadderSyncMessageName = "Phoney_LadderSync_v1";
     private bool _registered;
 
     // ─── Registration ───────────────────────────────────────────────────────
@@ -44,8 +46,10 @@ public class PhoneyNetworkManager
         nm.CustomMessagingManager.RegisterNamedMessageHandler(ItemValueMessageName, OnReceiveItemValueMessage);
         nm.CustomMessagingManager.RegisterNamedMessageHandler(DemonicSyncMessageName, OnReceiveDemonicSyncMessage);
         nm.CustomMessagingManager.RegisterNamedMessageHandler(DoorSyncMessageName, OnReceiveDoorSyncMessage);
+        nm.CustomMessagingManager.RegisterNamedMessageHandler(ItemCycleMessageName, OnReceiveItemCycleMessage);
+        nm.CustomMessagingManager.RegisterNamedMessageHandler(LadderSyncMessageName, OnReceiveLadderSyncMessage);
         _registered = true;
-        PhoneyPlugin.Logger.LogInfo("[Network] Registered Phoney network message handlers (voice + scrap + value + demonic + door sync).");
+        PhoneyPlugin.Logger.LogInfo("[Network] Registered Phoney network message handlers (voice + scrap + value + demonic + door + cycle + ladder sync).");
     }
 
     public void Unregister()
@@ -59,6 +63,8 @@ public class PhoneyNetworkManager
             nm.CustomMessagingManager.UnregisterNamedMessageHandler(ItemValueMessageName);
             nm.CustomMessagingManager.UnregisterNamedMessageHandler(DemonicSyncMessageName);
             nm.CustomMessagingManager.UnregisterNamedMessageHandler(DoorSyncMessageName);
+            nm.CustomMessagingManager.UnregisterNamedMessageHandler(ItemCycleMessageName);
+            nm.CustomMessagingManager.UnregisterNamedMessageHandler(LadderSyncMessageName);
         }
         _registered = false;
     }
@@ -371,6 +377,85 @@ public class PhoneyNetworkManager
             if (ai != null)
             {
                 ai.SetDoorInteraction(new Vector3(x, y, z), isUsingDoor);
+            }
+        }
+    }
+
+    public void BroadcastItemCycle(ulong enemyNetId)
+    {
+        var nm = NetworkManager.Singleton;
+        if (nm == null || nm.CustomMessagingManager == null) return;
+        if (!nm.IsServer && !nm.IsHost) return;
+
+        const int bufferSize = sizeof(ulong);
+        using var writer = new FastBufferWriter(bufferSize, Allocator.Temp);
+        writer.WriteValueSafe(enemyNetId);
+
+        nm.CustomMessagingManager.SendNamedMessageToAll(ItemCycleMessageName, writer);
+        PhoneyPlugin.Logger.LogDebug($"[Network] Broadcasted item cycle: enemy={enemyNetId}");
+    }
+
+    private void OnReceiveItemCycleMessage(ulong senderClientId, FastBufferReader reader)
+    {
+        if (!reader.TryBeginRead(sizeof(ulong))) return;
+        reader.ReadValueSafe(out ulong enemyNetId);
+
+        var nm = NetworkManager.Singleton;
+        if (nm == null) return;
+
+        if (nm.SpawnManager.SpawnedObjects.TryGetValue(enemyNetId, out var enemyObj) && enemyObj != null)
+        {
+            var sm = enemyObj.GetComponent<MaskedScrapManager>();
+            if (sm != null)
+            {
+                sm.CycleInventoryLocally();
+            }
+        }
+    }
+
+    public void BroadcastLadderSync(ulong enemyNetId, bool isClimbing, float climbDirection, float speedMultiplier)
+    {
+        var nm = NetworkManager.Singleton;
+        if (nm == null || nm.CustomMessagingManager == null) return;
+        if (!nm.IsServer && !nm.IsHost) return;
+
+        int bufferSize = sizeof(ulong) + sizeof(bool) + sizeof(float) + sizeof(float);
+        using var writer = new FastBufferWriter(bufferSize, Allocator.Temp);
+        writer.WriteValueSafe(enemyNetId);
+        writer.WriteValueSafe(isClimbing);
+        writer.WriteValueSafe(climbDirection);
+        writer.WriteValueSafe(speedMultiplier);
+
+        nm.CustomMessagingManager.SendNamedMessageToAll(LadderSyncMessageName, writer);
+        PhoneyPlugin.Logger.LogDebug($"[Network] Broadcasted ladder sync: enemy={enemyNetId}, climbing={isClimbing}, dir={climbDirection:F1}");
+    }
+
+    private void OnReceiveLadderSyncMessage(ulong senderClientId, FastBufferReader reader)
+    {
+        int size = sizeof(ulong) + sizeof(bool) + sizeof(float) + sizeof(float);
+        if (!reader.TryBeginRead(size)) return;
+
+        reader.ReadValueSafe(out ulong enemyNetId);
+        reader.ReadValueSafe(out bool isClimbing);
+        reader.ReadValueSafe(out float climbDirection);
+        reader.ReadValueSafe(out float speedMultiplier);
+
+        var nm = NetworkManager.Singleton;
+        if (nm == null) return;
+
+        if (nm.SpawnManager.SpawnedObjects.TryGetValue(enemyNetId, out var enemyObj) && enemyObj != null)
+        {
+            var ai = enemyObj.GetComponent<PhoneyDeceptiveAI>();
+            if (ai != null)
+            {
+                if (isClimbing)
+                {
+                    ai.StartClimbingLadder(climbDirection, speedMultiplier);
+                }
+                else
+                {
+                    ai.StopClimbingLadder();
+                }
             }
         }
     }

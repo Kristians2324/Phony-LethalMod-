@@ -44,6 +44,12 @@ public class MaskedHeldItemHolder : MonoBehaviour
         InitLayers();
     }
 
+    public void RebindLayers()
+    {
+        _initializedLayers = false;
+        InitLayers();
+    }
+
     private void InitLayers()
     {
         if (_initializedLayers || Masked?.creatureAnimator == null) return;

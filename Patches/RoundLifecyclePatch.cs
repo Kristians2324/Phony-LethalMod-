@@ -25,8 +25,10 @@ public class RoundLifecyclePatch
     {
         PhoneyPlugin.Logger.LogInfo("[Lifecycle] ShipHasLeft fired — clearing voice emitters and scrap registry.");
         AudioCaptureManager.Instance.Clear();
+        ClipVault.Instance.PruneForNewExpedition();
         Phoney.AI.MaskedScrapManager.GloballyProcessedScrapIds.Clear();
         Phoney.AI.MaskedScrapManager.TaintedScrapIds.Clear();
+        Phoney.AI.MaskedScrapManager.ClearCachedTeleports();
         Phoney.AI.MaskedHeldItemManager.LastKnownPlayerEquipment.Clear();
     }
 
@@ -39,6 +41,7 @@ public class RoundLifecyclePatch
         AudioCaptureManager.Instance.TrySubscribeToDissonance();
         Phoney.AI.MaskedScrapManager.GloballyProcessedScrapIds.Clear();
         Phoney.AI.MaskedScrapManager.TaintedScrapIds.Clear();
+        Phoney.AI.MaskedScrapManager.ClearCachedTeleports();
         PhoneyPlugin.Logger.LogInfo($"[Lifecycle] Vault holds {ClipVault.Instance.TotalClipCount} clips.");
         PhoneyPlugin.Logger.LogInfo($"[Lifecycle] inShipPhase = {StartOfRound.Instance?.inShipPhase}");
         PhoneyPlugin.Logger.LogInfo($"[Lifecycle] currentLevel = {StartOfRound.Instance?.currentLevel?.PlanetName ?? "NULL"}");
@@ -71,5 +74,6 @@ public class GameNetworkManagerPatch
     private static void DisconnectPostfix()
     {
         PhoneyPlugin.Logger.LogInfo("[Lifecycle] GameNetworkManager.Disconnect() fired — session ending.");
+        ClipVault.Instance.Clear();
     }
 }

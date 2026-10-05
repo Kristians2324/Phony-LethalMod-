@@ -146,18 +146,7 @@ public class MaskedEnemyPatch
             PhoneyPlugin.Logger.LogInfo("[MaskedPatch]   PhoneyDeceptiveAI attached. Starting in UndercoverLooting.");
         }
 
-        // ── 9. MaskedPropSwitcher ─────────────────────────────────────────────
-        if (PhoneyPlugin.EnableHeldItems.Value && deceptiveAI != null)
-        {
-            PhoneyPlugin.Logger.LogInfo("[MaskedPatch] Step 9: Attaching MaskedPropSwitcher...");
-            var switcher = __instance.gameObject.GetComponent<MaskedPropSwitcher>()
-                           ?? __instance.gameObject.AddComponent<MaskedPropSwitcher>();
-            switcher.Initialize(__instance, deceptiveAI, holder?.HeldToolProp, rightHandBone);
-            PhoneyPlugin.Logger.LogInfo("[MaskedPatch]   MaskedPropSwitcher attached.");
-        }
-
-
-        // ── 10. VR deception ───────────────────────────────────────────────────
+        // ── 9. VR deception ───────────────────────────────────────────────────
         PhoneyPlugin.Logger.LogInfo($"[MaskedPatch] Step 10: VRFriendlyDeception = {PhoneyPlugin.VRFriendlyDeception.Value}...");
         if (PhoneyPlugin.VRFriendlyDeception.Value)
         {
@@ -230,9 +219,27 @@ public class MaskedEnemyPatch
         {
             ai.EnforceHumanSpeedAndMovement();
 
-            if (ai.IsUsingDoor && __instance.stareAtTransform != null)
+            // Enforce Running animation state for clients (and host fallback)
+            bool isServer = NetworkManager.Singleton?.IsServer == true || NetworkManager.Singleton?.IsHost == true;
+            if (!isServer && ai.NetworkSyncedRunning)
+            {
+                __instance.running = true;
+                if (__instance.creatureAnimator != null)
+                {
+                    __instance.creatureAnimator.SetBool("Running", true);
+                }
+            }
+
+            if (ai.CurrentPhase != MimicPhase.AmbushStrike && __instance.stareAtTransform != null)
             {
                 __instance.stareAtTransform = null;
+            }
+
+            // Dampen look rigs while climbing ladders so head doesn't twist
+            if (ai.IsClimbingLadder)
+            {
+                if (__instance.lookRig1 != null) __instance.lookRig1.weight = 0f;
+                if (__instance.lookRig2 != null) __instance.lookRig2.weight = 0f;
             }
 
             // Clear vanilla crouching if the mimic is not performing a deceptive crouch greeting or scrap pickup.
@@ -245,27 +252,36 @@ public class MaskedEnemyPatch
                 __instance.crouching = false;
                 if (NetworkManager.Singleton?.IsServer == true || NetworkManager.Singleton?.IsHost == true)
                 {
-                    __instance.SetCrouchingServerRpc(false);
+                    __instance.SetCrouchingClientRpc(false);
                 }
             }
+        }
+    }
 
-            // Synchronize authentic player holding animation layers & eliminate zombie arms
-            var holder = __instance.GetComponent<MaskedHeldItemHolder>();
-            var scrapManager = __instance.GetComponent<MaskedScrapManager>();
-            bool hasRealScrap = scrapManager != null && scrapManager.HasHeldScrap;
-            bool isAggressive = ai.CurrentPhase == MimicPhase.AmbushStrike;
-            if (holder != null)
-            {
-                holder.UpdateAnimationLayers(hasRealScrap, isAggressive);
-            }
-            else if (!isAggressive)
-            {
-                __instance.handsOut = false;
-                if (__instance.creatureAnimator != null)
-                {
-                    __instance.creatureAnimator.SetBool("HandsOut", false);
-                }
-            }
+    [HarmonyPatch("CalculateAnimationDirection")]
+    [HarmonyPrefix]
+    private static bool CalculateAnimationDirectionPrefix(MaskedPlayerEnemy __instance)
+    {
+        if (__instance == null || !PhoneyPlugin.EnableDeceptiveAI.Value) return true;
+        var ai = __instance.gameObject.GetComponent<PhoneyDeceptiveAI>();
+        if (ai != null && ai.IsClimbingLadder)
+        {
+            // Suppress vanilla ground locomotion updates while on ladder and keep previousPosition synced
+            __instance.previousPosition = __instance.transform.position;
+            return false;
+        }
+        return true;
+    }
+
+    [HarmonyPatch("SetRunningClientRpc")]
+    [HarmonyPostfix]
+    private static void SetRunningClientRpcPostfix(MaskedPlayerEnemy __instance, bool setRunning)
+    {
+        if (__instance == null) return;
+        var ai = __instance.gameObject.GetComponent<PhoneyDeceptiveAI>();
+        if (ai != null)
+        {
+            ai.NetworkSyncedRunning = setRunning;
         }
     }
 
@@ -278,6 +294,18 @@ public class MaskedEnemyPatch
         if (__instance == null || !PhoneyPlugin.EnableDeceptiveAI.Value) return true;
         var ai = __instance.gameObject.GetComponent<PhoneyDeceptiveAI>();
         if (ai == null) return true;
+
+        // 0. Ladder Gaze Lock: While climbing a ladder, head remains forward/neutral facing the ladder
+        if (ai.IsClimbingLadder)
+        {
+            __instance.stareAtTransform = null;
+            __instance.lookAtPositionTimer = 0f;
+            if (__instance.headTiltTarget != null)
+            {
+                __instance.headTiltTarget.localEulerAngles = Vector3.zero;
+            }
+            return false;
+        }
 
         // 1. Strict Door Gaze Lock: While using a door, keep body and head gaze locked on the door trigger!
         // Never allow vanilla head-tracking or stareAtTransform to turn the mimic toward nearby players.
@@ -305,6 +333,10 @@ public class MaskedEnemyPatch
             }
             return false;
         }
+        else if (__instance.agent != null && !ai.IsClimbingLadder && __instance.agent.angularSpeed < 100f)
+        {
+            __instance.agent.angularSpeed = 600f;
+        }
 
         // 2. Clear vanilla's persistent stareAtTransform in non-aggressive phases so mimic doesn't zombie-stare
         if (ai.CurrentPhase != MimicPhase.AmbushStrike && __instance.stareAtTransform != null)
@@ -312,6 +344,44 @@ public class MaskedEnemyPatch
             __instance.stareAtTransform = null;
         }
 
+        // 3. MOVING GAZE LOCK: While moving forward in non-aggressive phases, prevent looking sideways at players or walls!
+        // Real players face and look where they are walking / running.
+        if (ai.CurrentPhase != MimicPhase.AmbushStrike && __instance.agent != null && __instance.agent.velocity.sqrMagnitude > 0.15f)
+        {
+            __instance.stareAtTransform = null;
+            __instance.lookAtPositionTimer = 0f;
+
+            Vector3 moveForward = __instance.agent.velocity;
+            moveForward.y = 0;
+            if (moveForward != Vector3.zero)
+            {
+                Vector3 forwardGaze = __instance.transform.position + moveForward.normalized * 8f + Vector3.up * 1.4f;
+                if (__instance.headTiltTarget != null)
+                {
+                    __instance.headTiltTarget.LookAt(forwardGaze);
+                    __instance.headTiltTarget.localEulerAngles = new Vector3(__instance.headTiltTarget.localEulerAngles.x, 0f, 0f);
+                }
+            }
+            return false;
+        }
+
+        return true;
+    }
+
+    // ─── LookAtPlayerServerRpc ────────────────────────────────────────────────
+ 
+    [HarmonyPatch("LookAtPlayerServerRpc")]
+    [HarmonyPrefix]
+    private static bool LookAtPlayerServerRpcPrefix(MaskedPlayerEnemy __instance, int playerId)
+    {
+        if (__instance == null || !PhoneyPlugin.EnableDeceptiveAI.Value) return true;
+        var ai = __instance.gameObject.GetComponent<PhoneyDeceptiveAI>();
+        if (ai == null) return true;
+
+        if (ai.IsUsingDoor || ai.CurrentPhase != MimicPhase.AmbushStrike)
+        {
+            return false;
+        }
         return true;
     }
 
@@ -319,7 +389,7 @@ public class MaskedEnemyPatch
 
     [HarmonyPatch("LookAtPlayerClientRpc")]
     [HarmonyPrefix]
-    private static bool LookAtPlayerClientRpcPrefix(MaskedPlayerEnemy __instance)
+    private static bool LookAtPlayerClientRpcPrefix(MaskedPlayerEnemy __instance, int playerId)
     {
         if (__instance == null || !PhoneyPlugin.EnableDeceptiveAI.Value) return true;
         var ai = __instance.gameObject.GetComponent<PhoneyDeceptiveAI>();
@@ -414,6 +484,7 @@ public class MaskedEnemyPatch
 
     [HarmonyPatch("OnCollideWithPlayer")]
     [HarmonyPrefix]
+    [HarmonyPriority(Priority.First)]
     private static bool OnCollideWithPlayerPrefix(MaskedPlayerEnemy __instance, Collider other)
     {
         if (__instance == null || !PhoneyPlugin.EnableDeceptiveAI.Value) return true;
@@ -427,23 +498,29 @@ public class MaskedEnemyPatch
 
         PhoneyPlugin.Logger.LogInfo($"[MaskedPatch] OnCollideWithPlayer: '{__instance.gameObject.name}' in phase {ai.CurrentPhase}");
 
-        if (ai.CurrentPhase == MimicPhase.UndercoverLooting ||
-            ai.CurrentPhase == MimicPhase.LuringFollower)
+        if (ai.CurrentPhase != MimicPhase.AmbushStrike)
         {
-            var player = other.GetComponent<PlayerControllerB>()
-                         ?? other.GetComponentInParent<PlayerControllerB>();
-            if (player != null && !player.isPlayerDead)
-            {
-                PhoneyPlugin.Logger.LogInfo($"[MaskedPatch]   Phase {ai.CurrentPhase} — suppressing kill. Bumped by '{player.playerUsername}'.");
-                ai.OnPlayerBumpedInto(player);
-            }
-            return false; // No kill
-        }
+            // Reset any accidental vanilla kill state flags immediately
+            __instance.startingKillAnimationLocalClient = false;
+            __instance.inKillAnimation = false;
 
-        if (ai.CurrentPhase == MimicPhase.TacticalRetreat)
-        {
-            PhoneyPlugin.Logger.LogInfo("[MaskedPatch]   Phase TacticalRetreat — suppressing kill (fleeing).");
-            return false;
+            if (ai.CurrentPhase == MimicPhase.UndercoverLooting ||
+                ai.CurrentPhase == MimicPhase.LuringFollower)
+            {
+                var player = other.GetComponent<PlayerControllerB>()
+                             ?? other.GetComponentInParent<PlayerControllerB>();
+                if (player != null && !player.isPlayerDead)
+                {
+                    PhoneyPlugin.Logger.LogInfo($"[MaskedPatch]   Phase {ai.CurrentPhase} — suppressing kill. Bumped by '{player.playerUsername}'.");
+                    ai.OnPlayerBumpedInto(player);
+                }
+            }
+            else if (ai.CurrentPhase == MimicPhase.TacticalRetreat)
+            {
+                PhoneyPlugin.Logger.LogInfo("[MaskedPatch]   Phase TacticalRetreat — suppressing kill (fleeing).");
+            }
+
+            return false; // Zero tolerance: no kill in friendly / retreat mode!
         }
 
         if (ai.CurrentPhase == MimicPhase.AmbushStrike)
@@ -466,6 +543,42 @@ public class MaskedEnemyPatch
             return true;
         }
 
+        return true;
+    }
+
+    // ─── KillPlayerAnimation RPC Interception (Zero-Tolerance Friendly Kill Guard) ──
+
+    [HarmonyPatch("KillPlayerAnimationServerRpc")]
+    [HarmonyPrefix]
+    [HarmonyPriority(Priority.First)]
+    private static bool KillPlayerAnimationServerRpcPrefix(MaskedPlayerEnemy __instance, int playerObjectId)
+    {
+        if (__instance == null || !PhoneyPlugin.EnableDeceptiveAI.Value) return true;
+        var ai = __instance.GetComponent<PhoneyDeceptiveAI>();
+        if (ai != null && ai.CurrentPhase != MimicPhase.AmbushStrike)
+        {
+            PhoneyPlugin.Logger.LogWarning($"[MaskedPatch] BLOCKED KillPlayerAnimationServerRpc for player #{playerObjectId}! Mimic '{__instance.gameObject.name}' is in phase {ai.CurrentPhase} (friendly/undercover). Suppressing kill.");
+            __instance.startingKillAnimationLocalClient = false;
+            __instance.inKillAnimation = false;
+            return false;
+        }
+        return true;
+    }
+
+    [HarmonyPatch("KillPlayerAnimationClientRpc")]
+    [HarmonyPrefix]
+    [HarmonyPriority(Priority.First)]
+    private static bool KillPlayerAnimationClientRpcPrefix(MaskedPlayerEnemy __instance, int playerObjectId)
+    {
+        if (__instance == null || !PhoneyPlugin.EnableDeceptiveAI.Value) return true;
+        var ai = __instance.GetComponent<PhoneyDeceptiveAI>();
+        if (ai != null && ai.CurrentPhase != MimicPhase.AmbushStrike)
+        {
+            PhoneyPlugin.Logger.LogWarning($"[MaskedPatch] BLOCKED KillPlayerAnimationClientRpc for player #{playerObjectId}! Mimic '{__instance.gameObject.name}' is in phase {ai.CurrentPhase} (friendly/undercover). Suppressing kill.");
+            __instance.startingKillAnimationLocalClient = false;
+            __instance.inKillAnimation = false;
+            return false;
+        }
         return true;
     }
 

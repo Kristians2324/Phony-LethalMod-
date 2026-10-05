@@ -8,6 +8,7 @@ using HarmonyLib;
 using Phoney.AI;
 using Phoney.Core;
 using Phoney.Debug;
+using Phoney.Patches;
 
 namespace Phoney;
 
@@ -51,6 +52,7 @@ public class PhoneyPlugin : BaseUnityPlugin
     public static ConfigEntry<float> AmbushDistanceThreshold { get; private set; } = null!;
     public static ConfigEntry<bool>  AllowTacticalRetreat    { get; private set; } = null!;
     public static ConfigEntry<float> LostLineOfSightTimeout  { get; private set; } = null!;
+    public static ConfigEntry<float> MaxChaseRange           { get; private set; } = null!;
     public static ConfigEntry<float> ParanoiaIntervalSeconds { get; private set; } = null!;
     public static ConfigEntry<float> InitialHostilityChance  { get; private set; } = null!;
     public static ConfigEntry<float> HostilityChanceIncrement{ get; private set; } = null!;
@@ -252,24 +254,28 @@ public class PhoneyPlugin : BaseUnityPlugin
             "Overhaul Masked AI into a realistic deceptive crewmate that loots rooms, hauls scrap to entrance, and escalates paranoia.");
 
         AmbushDistanceThreshold = Config.Bind(
-            "DeceptiveAI", "AmbushDistanceThreshold", 5.5f,
-            "Distance in metres for the mimic's active aggro range detection to trigger an ambush attack (default: 5.5m).");
+            "DeceptiveAI", "AmbushDistanceThreshold", 16.0f,
+            "Distance in metres for the mimic's active aggro range detection to trigger an ambush attack (default: 16.0m).");
 
         AllowTacticalRetreat = Config.Bind(
             "DeceptiveAI", "AllowTacticalRetreat", true,
             "Allow the mimic to flee into darkness and reset its disguise if a player escapes far away.");
 
         LostLineOfSightTimeout = Config.Bind(
-            "DeceptiveAI", "LostLineOfSightTimeout", 7.0f,
-            "Duration in seconds of broken line of sight before an aggroed mimic gives up pursuit, runs back to the facility, and returns to normal (default: 7.0s).");
+            "DeceptiveAI", "LostLineOfSightTimeout", 18.0f,
+            "Duration in seconds of broken line of sight before an aggroed mimic gives up pursuit, runs back to the facility, and returns to normal (default: 18.0s).");
+
+        MaxChaseRange = Config.Bind(
+            "DeceptiveAI", "MaxChaseRange", 85.0f,
+            "Maximum distance in metres before a mimic gives up chasing an escaped player when line of sight is broken (default: 85.0m inside, 140.0m outside).");
 
         ParanoiaIntervalSeconds = Config.Bind(
             "DeceptiveAI", "ParanoiaIntervalSeconds", 120.0f,
             "Interval in seconds (default: 120s / 2 minutes) for each paranoia hostility check.");
 
         InitialHostilityChance = Config.Bind(
-            "DeceptiveAI", "InitialHostilityChance", 0.25f,
-            "Base percentage chance (0.0 - 1.0) on the first 2-minute mark for the mimic to become hostile (default: 0.25 = 25%).");
+            "DeceptiveAI", "InitialHostilityChance", 0.40f,
+            "Base percentage chance (0.0 - 1.0) on the first 2-minute mark for the mimic to become hostile (default: 0.40 = 40%).");
 
         HostilityChanceIncrement = Config.Bind(
             "DeceptiveAI", "HostilityChanceIncrement", 0.25f,
@@ -310,12 +316,12 @@ public class PhoneyPlugin : BaseUnityPlugin
             "Average cooldown in seconds between pursuit demonic vocalizations during an ambush chase (default: 22.0s).");
 
         AmbushSprintSpeed = Config.Bind(
-            "DeceptiveAI", "AmbushSprintSpeed", 4.95f,
-            "Sprint speed of the mimic during ambush pursuit (default: 4.95f).");
+            "DeceptiveAI", "AmbushSprintSpeed", 6.8f,
+            "Sprint speed of the mimic during ambush pursuit (player sprint: ~10.3 m/s, default: 6.8f). Allows sprinting players to outrun the mimic, but outpaces walking players.");
 
         AmbushJogSpeed = Config.Bind(
-            "DeceptiveAI", "AmbushJogSpeed", 2.95f,
-            "Reaction-window jog speed during ambush (default: 2.95f).");
+            "DeceptiveAI", "AmbushJogSpeed", 3.8f,
+            "Reaction-window jog speed during ambush (player walk: ~4.6 m/s, default: 3.8f). Gives players a window to gain distance and recover stamina.");
 
         MaxCarriedScrapCount = Config.Bind(
             "DeceptiveAI", "MaxCarriedScrapCount", 4,
@@ -383,15 +389,28 @@ public class PhoneyPlugin : BaseUnityPlugin
     internal static void Patch()
     {
         Harmony ??= new Harmony(PluginGuid);
-        Logger.LogInfo("[STARTUP] Harmony.PatchAll() — scanning for [HarmonyPatch] classes...");
-        try
+        Logger.LogInfo("[STARTUP] Registering Harmony patches class-by-class...");
+        Type[] patchClasses = new Type[]
         {
-            Harmony.PatchAll();
-            Logger.LogInfo("[STARTUP] Harmony.PatchAll() completed with no exception.");
-        }
-        catch (Exception ex)
+            typeof(ChatCommandPatch),
+            typeof(RoundLifecyclePatch),
+            typeof(GameNetworkManagerPatch),
+            typeof(VoiceChatPatch),
+            typeof(MoonSpawnPatch),
+            typeof(MaskedEnemyPatch)
+        };
+
+        foreach (var cls in patchClasses)
         {
-            Logger.LogError($"[STARTUP] Harmony.PatchAll() THREW EXCEPTION: {ex}");
+            try
+            {
+                Harmony.CreateClassProcessor(cls).Patch();
+                Logger.LogInfo($"[STARTUP] Harmony patched '{cls.Name}' successfully.");
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError($"[STARTUP] FAILED to patch '{cls.Name}': {ex}");
+            }
         }
     }
 
@@ -405,6 +424,7 @@ public class PhoneyPlugin : BaseUnityPlugin
     private void Update()
     {
         MainThreadDispatcher.DrainQueue();
+        Audio.AudioCaptureManager.Instance.UpdateMainThreadState();
         if (EnableHeldItems.Value)
         {
             AI.MaskedHeldItemManager.TrackAllLivingPlayers();
@@ -415,6 +435,7 @@ public class PhoneyPlugin : BaseUnityPlugin
     private void OnDestroy()
     {
         Logger.LogInfo("[SHUTDOWN] PhoneyPlugin.OnDestroy called.");
+        try { Audio.AudioCaptureManager.Instance.UnsubscribeDissonance(); } catch (Exception ex) { Logger.LogWarning($"[SHUTDOWN] Dissonance unsubscribe error: {ex.Message}"); }
         try { SpeechTranscriber.Instance.Dispose(); }         catch (Exception ex) { Logger.LogWarning($"[SHUTDOWN] Whisper dispose error: {ex.Message}"); }
         try { Network.PhoneyNetworkManager.Instance.Unregister(); } catch (Exception ex) { Logger.LogWarning($"[SHUTDOWN] NetworkManager unregister error: {ex.Message}"); }
         Unpatch();

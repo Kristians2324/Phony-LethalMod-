@@ -187,17 +187,45 @@ public class MaskedScrapManager : MonoBehaviour
     public static readonly HashSet<ulong> TaintedScrapIds = new();
 
     /// <summary>
+    private static EntranceTeleport[]? s_cachedTeleports;
+    private static float s_lastTeleportCacheTime;
+
+    public static EntranceTeleport[] GetCachedTeleports()
+    {
+        if (s_cachedTeleports == null || s_cachedTeleports.Length == 0 || Time.time - s_lastTeleportCacheTime > 6.0f)
+        {
+            try
+            {
+                s_cachedTeleports = UnityEngine.Object.FindObjectsOfType<EntranceTeleport>();
+            }
+            catch
+            {
+                s_cachedTeleports = Array.Empty<EntranceTeleport>();
+            }
+            s_lastTeleportCacheTime = Time.time;
+        }
+        return s_cachedTeleports ?? Array.Empty<EntranceTeleport>();
+    }
+
+    public static void ClearCachedTeleports()
+    {
+        s_cachedTeleports = null;
+        s_lastTeleportCacheTime = 0f;
+    }
+
+    /// <summary>
     /// Checks if a position is near any EntranceTeleport door.
     /// </summary>
     public static bool IsNearEntranceDoor(Vector3 position, float radius = 7.0f)
     {
         try
         {
-            var teleports = UnityEngine.Object.FindObjectsOfType<EntranceTeleport>();
-            if (teleports != null)
+            var teleports = GetCachedTeleports();
+            if (teleports != null && teleports.Length > 0)
             {
-                foreach (var t in teleports)
+                for (int i = 0; i < teleports.Length; i++)
                 {
+                    var t = teleports[i];
                     if (t == null) continue;
                     Vector3 doorPos = GetDoorPosition(t);
                     if (Vector3.Distance(position, doorPos) <= radius)
@@ -241,7 +269,7 @@ public class MaskedScrapManager : MonoBehaviour
     {
         try
         {
-            var teleports = UnityEngine.Object.FindObjectsOfType<EntranceTeleport>();
+            var teleports = GetCachedTeleports();
             if (teleports == null || teleports.Length == 0) return null;
 
             var match = teleports.FirstOrDefault(t => t != null && t.entranceId == 0 && t.isEntranceToBuilding == wantEntranceToBuilding);
@@ -255,10 +283,55 @@ public class MaskedScrapManager : MonoBehaviour
     }
 
     /// <summary>
-    /// Gets the position of an EntranceTeleport door.
-    /// Prioritizes the actual interact trigger (door knob / handle) where players stand.
+    /// Finds the EntranceTeleport closest to a specified position matching the desired direction.
+    /// Supports both Main Entrance and Fire Exits.
     /// </summary>
-    public static Vector3 GetDoorPosition(EntranceTeleport? door)
+    public static EntranceTeleport? FindClosestDoor(Vector3 fromPos, bool wantEntranceToBuilding)
+    {
+        try
+        {
+            var teleports = GetCachedTeleports();
+            if (teleports == null || teleports.Length == 0) return null;
+
+            return teleports
+                .Where(t => t != null && t.isEntranceToBuilding == wantEntranceToBuilding)
+                .OrderBy(t => Vector3.Distance(fromPos, GetDoorNavPosition(t)))
+                .FirstOrDefault();
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Gets the NavMesh standing/landing position in front of an EntranceTeleport door.
+    /// Uses entrancePoint (where players and enemies safely stand) and falls back to sampled NavMesh floor.
+    /// </summary>
+    public static Vector3 GetDoorNavPosition(EntranceTeleport? door)
+    {
+        if (door == null) return Vector3.zero;
+        if (door.entrancePoint != null)
+        {
+            Vector3 pos = door.entrancePoint.position;
+            if (NavMesh.SamplePosition(pos, out var hit, 2.5f, NavMesh.AllAreas))
+                return hit.position;
+            return pos;
+        }
+        if (door.triggerScript != null)
+        {
+            Vector3 trigPos = door.triggerScript.transform.position;
+            if (NavMesh.SamplePosition(trigPos, out var hit, 3.0f, NavMesh.AllAreas))
+                return hit.position;
+            return trigPos;
+        }
+        return door.transform.position;
+    }
+
+    /// <summary>
+    /// Gets the visual interact handle / knob position of an EntranceTeleport door (for gaze tracking).
+    /// </summary>
+    public static Vector3 GetDoorInteractPosition(EntranceTeleport? door)
     {
         if (door == null) return Vector3.zero;
         if (door.triggerScript != null)
@@ -266,6 +339,14 @@ public class MaskedScrapManager : MonoBehaviour
         if (door.entrancePoint != null)
             return door.entrancePoint.position;
         return door.transform.position;
+    }
+
+    /// <summary>
+    /// Gets the navigation position of an EntranceTeleport door (points to walkable NavMesh landing).
+    /// </summary>
+    public static Vector3 GetDoorPosition(EntranceTeleport? door)
+    {
+        return GetDoorNavPosition(door);
     }
 
     /// <summary>
@@ -363,7 +444,7 @@ public class MaskedScrapManager : MonoBehaviour
                 return StartOfRound.Instance.shipDoorAudioSource.transform.position;
             }
 
-            var teleports = UnityEngine.Object.FindObjectsOfType<EntranceTeleport>();
+            var teleports = GetCachedTeleports();
             if (teleports != null && teleports.Length > 0)
             {
                 // If inside facility, find the main interior exit door (isEntranceToBuilding == false)
@@ -632,9 +713,21 @@ public class MaskedScrapManager : MonoBehaviour
         if (scrap == null) return;
         if (scrap.itemProperties != null && scrap.itemProperties.twoHanded)
         {
-            // Two-handed item: clear any other items so it is strictly the only item carried!
-            CarriedItems.Clear();
-            CarriedItems.Add(scrap);
+            // Two-handed item: pocket any existing carried items so meshes are concealed and items aren't leaked!
+            for (int i = 0; i < CarriedItems.Count; i++)
+            {
+                var prev = CarriedItems[i];
+                if (prev != null && prev != scrap)
+                {
+                    prev.isPocketed = true;
+                    prev.EnableItemMeshes(false);
+                    Transform beltBone = _beltBone ?? transform;
+                    prev.parentObject = beltBone;
+                    prev.transform.SetParent(beltBone, false);
+                }
+            }
+            CarriedItems.Remove(scrap);
+            CarriedItems.Insert(0, scrap);
             AttachPrimaryItem(scrap);
             return;
         }
@@ -799,14 +892,33 @@ public class MaskedScrapManager : MonoBehaviour
     /// Cycles through carried inventory items, swapping which item is actively held in hands.
     /// Only works if carrying multiple items and the current held item is NOT a two-handed item.
     /// (Two-handed items occupy both hands and cannot be hotbar-cycled in vanilla Lethal Company).
+    /// Broadcasts the inventory swap across the network so all clients see the mimic swap items.
     /// </summary>
-    public bool CycleInventory()
+    public bool CycleInventory(bool syncToNetwork = true)
     {
         if (CarriedItems.Count <= 1 || _masked == null) return false;
 
         // Two-handed items cannot be cycled away from — player must hold it in both hands!
         if (HeldScrap != null && HeldScrap.itemProperties != null && HeldScrap.itemProperties.twoHanded)
             return false;
+
+        CycleInventoryLocally();
+
+        if (syncToNetwork && _masked.NetworkObject != null)
+        {
+            PhoneyNetworkManager.Instance.BroadcastItemCycle(_masked.NetworkObject.NetworkObjectId);
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Executes the hotbar cycle locally on this client: rotates inventory list,
+    /// hides the old primary mesh, and attaches the new primary item in hands.
+    /// </summary>
+    public void CycleInventoryLocally()
+    {
+        if (CarriedItems.Count <= 1 || _masked == null) return;
 
         // Current primary item gets pocketed
         var oldPrimary = CarriedItems[0];
@@ -832,10 +944,7 @@ public class MaskedScrapManager : MonoBehaviour
 
             PhoneyPlugin.Logger.LogInfo(
                 $"[ScrapManager] '{_masked.gameObject.name}' cycled hotbar item -> now holding '{newPrimary.itemProperties?.itemName ?? "Item"}' ({CarriedItems.Count} total carried).");
-            return true;
         }
-
-        return false;
     }
 
     /// <summary>

@@ -89,20 +89,25 @@ public class ClipVault
                 .OrderByDescending(x => x.Score)
                 .ToList();
 
-            // Diversity & Variety: pick randomly among the top-tier candidates (within 25 points of the top score)
-            // so the mimic cycles through different greetings and funny lines instead of repeating the same one!
+            // Diversity & Variety: pick among top-tier candidates (within 22 points of the top score)
+            // with recency-weighted preference so recent dialogue is prioritized over ancient clips from early in the game!
+            // (Removed Take(4) which previously truncated candidate lists and locked selection to the oldest clips!)
             if (scored.Count > 0)
             {
                 float bestScore = scored[0].Score;
-                var topCandidates = scored.Where(x => x.Score >= bestScore - 25f).Take(4).ToList();
-                return topCandidates[UnityEngine.Random.Range(0, topCandidates.Count)].Clip;
+                var topCandidates = scored
+                    .Where(x => x.Score >= bestScore - 22f)
+                    .Select(x => x.Clip)
+                    .ToList();
+
+                return PickRecencyWeighted(topCandidates);
             }
 
             // Fallback: if all clips were heavily penalized by recent playback, pick any clip that isn't a direct parrot
             var fallback = clips.Where(c => !IsParrotOf(c.Transcript, incomingQuestion)).ToList();
             if (fallback.Count > 0)
             {
-                return fallback[UnityEngine.Random.Range(0, fallback.Count)];
+                return PickRecencyWeighted(fallback);
             }
 
             return null;
@@ -139,10 +144,8 @@ public class ClipVault
                 })
                 .ToList();
 
-            if (fresh.Count > 0)
-                return fresh[UnityEngine.Random.Range(0, fresh.Count)];
-
-            return candid[UnityEngine.Random.Range(0, candid.Count)];
+            var pool = fresh.Count > 0 ? fresh : candid;
+            return PickRecencyWeighted(pool);
         }
     }
 
@@ -164,9 +167,40 @@ public class ClipVault
                         return !_recentlyPlayed.TryGetValue(key, out float t) || Time.time - t > 75f;
                     })
                     .ToList();
-                if (fresh.Count > 0)
-                    return fresh[UnityEngine.Random.Range(0, fresh.Count)];
-                return matching[UnityEngine.Random.Range(0, matching.Count)];
+                var pool = fresh.Count > 0 ? fresh : matching;
+
+                // When preferred intent is Greeting, but greeting clips are ancient (> 240s old from ship landing),
+                // allow picking recent friendly banter / affirmative clips from the last 3 minutes so the mimic doesn't
+                // sound stuck in the dropship repeating round-start hellos!
+                if (preferredIntent == SemanticIntent.Greeting)
+                {
+                    bool allAncient = pool.All(c => Time.time - c.RecordedTimestamp > 240f);
+                    if (allAncient)
+                    {
+                        var recentBanter = clips
+                            .Where(c => (c.Intent == SemanticIntent.RawBanter || c.Intent == SemanticIntent.Affirmative || c.ContainsProfanity)
+                                     && (Time.time - c.RecordedTimestamp) < 180f)
+                            .Where(c => {
+                                string key = c.Transcript.Trim().ToLowerInvariant();
+                                return !_recentClipsHistory.Contains(key) && (!_recentlyPlayed.TryGetValue(key, out float t) || Time.time - t > 60f);
+                            })
+                            .ToList();
+
+                        if (recentBanter.Count > 0 && UnityEngine.Random.value < 0.50f)
+                        {
+                            return PickRecencyWeighted(recentBanter);
+                        }
+                    }
+                }
+
+                return PickRecencyWeighted(pool);
+            }
+            else
+            {
+                // Fallback if no matching clips for this intent
+                var fallback = clips.Where(c => c.Intent != SemanticIntent.WarningPanic).ToList();
+                if (fallback.Count > 0)
+                    return PickRecencyWeighted(fallback);
             }
 
             return null;
@@ -188,7 +222,7 @@ public class ClipVault
                 // If this player has no clips, check any clips in the entire vault as emergency fallback
                 var anyClips = _playerClips.Values.SelectMany(v => v).ToList();
                 if (anyClips.Count == 0) return null;
-                return anyClips[UnityEngine.Random.Range(0, anyClips.Count)];
+                return PickRecencyWeighted(anyClips);
             }
 
             // 1. Try panic / scream / urgent warning clips first
@@ -208,9 +242,8 @@ public class ClipVault
                 var freshPanic = panicClips
                     .Where(c => !_recentlyPlayed.TryGetValue(c.Transcript.Trim().ToLowerInvariant(), out float t) || Time.time - t > 20f)
                     .ToList();
-                if (freshPanic.Count > 0)
-                    return freshPanic[UnityEngine.Random.Range(0, freshPanic.Count)];
-                return panicClips[UnityEngine.Random.Range(0, panicClips.Count)];
+                var pool = freshPanic.Count > 0 ? freshPanic : panicClips;
+                return PickRecencyWeighted(pool);
             }
 
             // 2. Otherwise pick ANY fresh clip from this player
@@ -218,10 +251,10 @@ public class ClipVault
                 .Where(c => !_recentlyPlayed.TryGetValue(c.Transcript.Trim().ToLowerInvariant(), out float t) || Time.time - t > 15f)
                 .ToList();
             if (freshGeneral.Count > 0)
-                return freshGeneral[UnityEngine.Random.Range(0, freshGeneral.Count)];
+                return PickRecencyWeighted(freshGeneral);
 
             // 3. Fallback: any clip from this player
-            return clips[UnityEngine.Random.Range(0, clips.Count)];
+            return PickRecencyWeighted(clips);
         }
     }
 
@@ -346,9 +379,13 @@ public class ClipVault
             }
         }
 
-        float age = Time.time - clip.RecordedTimestamp;
-        if (age < 120f) score += 10f;
-        else if (age < 300f) score += 5f;
+        float age = Mathf.Max(0f, Time.time - clip.RecordedTimestamp);
+        // Recency boost: strong gradient favoring recent dialogue over ancient clips from round start
+        if (age < 45f) score += 40f;         // Just spoken in the last 45 seconds (extremely fresh!)
+        else if (age < 120f) score += 30f;   // Spoken in the last 2 minutes
+        else if (age < 240f) score += 20f;   // Spoken in the last 4 minutes
+        else if (age < 420f) score += 10f;   // Spoken in the last 7 minutes
+        else if (age < 600f) score += 5f;    // Spoken in the last 10 minutes
 
         score += UnityEngine.Random.Range(0f, 6f);
 
@@ -356,6 +393,44 @@ public class ClipVault
     }
 
     // ─── Internal helpers ─────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Selects a clip from the candidate list with weighted preference for recently recorded audio.
+    /// Clips recorded in the last 1–3 minutes have the highest weight, while older clips from early
+    /// in the expedition still have a chance to be chosen for natural variety.
+    /// </summary>
+    private static RecordedClip PickRecencyWeighted(IReadOnlyList<RecordedClip> candidates)
+    {
+        if (candidates.Count == 0) throw new ArgumentException("Candidate list cannot be empty.", nameof(candidates));
+        if (candidates.Count == 1) return candidates[0];
+
+        float now = Time.time;
+        float totalWeight = 0f;
+        Span<float> weights = stackalloc float[Math.Min(candidates.Count, 128)];
+        float[]? heapWeights = candidates.Count > 128 ? new float[candidates.Count] : null;
+        var activeWeights = heapWeights ?? weights[..candidates.Count];
+
+        for (int i = 0; i < candidates.Count; i++)
+        {
+            float age = Mathf.Max(0f, now - candidates[i].RecordedTimestamp);
+            // Half-life recency curve: a clip from 60s ago has ~4x weight of a clip from 300s ago
+            // Floor weight is 0.15f so older authentic clips can still occasionally be selected for variety
+            float w = Mathf.Max(0.15f, 1.0f / (1.0f + age / 90.0f));
+            activeWeights[i] = w;
+            totalWeight += w;
+        }
+
+        float roll = UnityEngine.Random.value * totalWeight;
+        float accum = 0f;
+        for (int i = 0; i < candidates.Count; i++)
+        {
+            accum += activeWeights[i];
+            if (roll <= accum)
+                return candidates[i];
+        }
+
+        return candidates[^1];
+    }
 
     public int GetClipCountForPlayer(ulong steamId)
     {
@@ -370,11 +445,56 @@ public class ClipVault
         if (_playerClips.TryGetValue(steamId, out var list) && list.Count > 0)
             return list;
 
-        // Fallback: use any available player's clips
-        return _playerClips.Values.FirstOrDefault(c => c.Count > 0);
+        // If steamId is the local player, also check if clips were stored under key 0
+        var localPlayer = Audio.AudioCaptureManager.Instance.CachedLocalPlayer;
+        if (localPlayer != null && steamId == localPlayer.playerSteamId && _playerClips.TryGetValue(0, out var zeroList) && zeroList.Count > 0)
+        {
+            return zeroList;
+        }
+
+        // Fallback: pick the player with the MOST RECENT clip, NOT the oldest!
+        return _playerClips.Values
+            .Where(c => c.Count > 0)
+            .OrderByDescending(l => l.Max(clip => clip.RecordedTimestamp))
+            .FirstOrDefault();
     }
 
-    // ─── Cleanup ──────────────────────────────────────────────────────────────
+    // ─── Cleanup & Lifecycle ──────────────────────────────────────────────────
+
+    /// <summary>
+    /// Prunes stale clips at the end of an expedition so the mimic doesn't indefinitely replay
+    /// voice lines from hours ago or previous moons. Keeps up to 15 most recent clips per player.
+    /// </summary>
+    public void PruneForNewExpedition()
+    {
+        lock (_lock)
+        {
+            float now = Time.time;
+            foreach (var kvp in _playerClips)
+            {
+                var list = kvp.Value;
+                // Remove clips older than 20 minutes (1200 seconds)
+                for (int i = list.Count - 1; i >= 0; i--)
+                {
+                    if (now - list[i].RecordedTimestamp > 1200f && list.Count > 8)
+                    {
+                        list[i].DisposeClip();
+                        list.RemoveAt(i);
+                    }
+                }
+
+                // Keep at most 15 most recent clips
+                while (list.Count > 15)
+                {
+                    list[0].DisposeClip();
+                    list.RemoveAt(0);
+                }
+            }
+
+            _recentClipsHistory.Clear();
+            PhoneyPlugin.Logger.LogInfo($"[ClipVault] Pruned vault for new expedition. Total clips remaining: {TotalClipCount}");
+        }
+    }
 
     public void Clear()
     {

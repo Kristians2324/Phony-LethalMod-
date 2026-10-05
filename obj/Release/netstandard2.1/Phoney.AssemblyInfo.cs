@@ -91,7 +91,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("com.user.phoney")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Release")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+993d9849f5871717a0300e5a2c43f3e44a3cfc4a")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+e85ce43c544a49cf8766b541ae19dc4f3a0eea67")]
 [assembly: System.Reflection.AssemblyProductAttribute("Phoney")]
 [assembly: System.Reflection.AssemblyTitleAttribute("com.user.phoney")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

@@ -350,7 +350,7 @@ public class PhoneyBloodyReveal : MonoBehaviour
                 _masked.SetHandsOutClientRpc(true);
                 if (_masked.creatureAnimator != null) _masked.creatureAnimator.SetBool("HandsOut", true);
             }
-            if (_masked.running)   { _masked.running  = false; _masked.SetRunningServerRpc(false); }
+            if (_masked.running)   { _masked.running  = false; _masked.SetRunningClientRpc(false); }
         }
 
         // Lingering bodily micro-spasms for another 0.4s while beginning pursuit

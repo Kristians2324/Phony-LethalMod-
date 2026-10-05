@@ -30,7 +30,7 @@ public class AudioCaptureManager
     {
         LastKnownMainThreadTime = Time.time;
         var lp = StartOfRound.Instance?.localPlayerController ?? GameNetworkManager.Instance?.localPlayerController;
-        if (lp != null)
+        if (lp != null && lp.playerSteamId != 0)
         {
             CachedLocalPlayer = lp;
             CachedLocalSteamId = lp.playerSteamId;
@@ -131,7 +131,27 @@ public class AudioCaptureManager
     {
         _activeListeners.Clear();
         _activeEmitters.Clear();
-        _subscribedComms = null;
+        // Do NOT set _subscribedComms = null!
+        // Dissonance voiceChatModule persists on StartOfRound across rounds.
+        // Clearing it caused duplicate subscriptions and 2x/3x duplicate mic samples on subsequent rounds.
+    }
+
+    public void UnsubscribeDissonance()
+    {
+        if (_subscribedComms != null && _dissonanceListener != null)
+        {
+            try
+            {
+                _subscribedComms.UnsubscribeFromRecordedAudio(_dissonanceListener);
+                PhoneyPlugin.Logger.LogInfo("[AudioCapture] Unsubscribed from Dissonance recorded audio.");
+            }
+            catch (Exception ex)
+            {
+                PhoneyPlugin.Logger.LogWarning($"[AudioCapture] Error unsubscribing from Dissonance: {ex.Message}");
+            }
+            _subscribedComms = null;
+            _dissonanceListener = null;
+        }
     }
 }
 
@@ -220,8 +240,23 @@ public class DissonanceVoiceCaptureListener : IMicrophoneSubscriber
         int chunkNum = _chunksDispatched;
 
         ulong steamId = AudioCaptureManager.Instance.CachedLocalSteamId;
+        if (steamId == 0)
+        {
+            var lp = AudioCaptureManager.Instance.CachedLocalPlayer 
+                     ?? StartOfRound.Instance?.localPlayerController 
+                     ?? GameNetworkManager.Instance?.localPlayerController;
+            if (lp != null && lp.playerSteamId != 0)
+            {
+                steamId = lp.playerSteamId;
+                AudioCaptureManager.Instance.CachedLocalSteamId = steamId;
+                AudioCaptureManager.Instance.CachedLocalPlayerName = lp.playerUsername;
+                AudioCaptureManager.Instance.CachedLocalPlayer = lp;
+            }
+        }
         string pName = AudioCaptureManager.Instance.CachedLocalPlayerName;
-        float timestamp = AudioCaptureManager.Instance.LastKnownMainThreadTime;
+        float timestamp = AudioCaptureManager.Instance.LastKnownMainThreadTime > 0f 
+            ? AudioCaptureManager.Instance.LastKnownMainThreadTime 
+            : Time.time;
 
         MainThreadDispatcher.Enqueue(() =>
         {
