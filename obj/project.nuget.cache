@@ -1,8 +1,8 @@
 {
   "version": 2,
-  "dgSpecHash": "KF32qMOKuMc=",
+  "dgSpecHash": "yGiwRcM+/fY=",
   "success": true,
-  "projectFilePath": "c:\\Users\\USER\\Documents\\Lethal mods\\Phoney\\Phoney.csproj",
+  "projectFilePath": "C:\\Users\\USER\\Documents\\Lethal mods\\Phoney\\Phoney.csproj",
   "expectedPackageFiles": [
     "C:\\Users\\USER\\.nuget\\packages\\bepinex.analyzers\\1.0.8\\bepinex.analyzers.1.0.8.nupkg.sha512",
     "C:\\Users\\USER\\.nuget\\packages\\bepinex.assemblypublicizer.msbuild\\0.4.1\\bepinex.assemblypublicizer.msbuild.0.4.1.nupkg.sha512",

@@ -28,6 +28,7 @@ public class PhoneyNetworkManager
     private const string ItemDropMessageName = "Phoney_ItemDropSync_v1";
     private const string ItemValueMessageName = "Phoney_ItemValueSync_v1";
     private const string DemonicSyncMessageName = "Phoney_DemonicSync_v1";
+    private const string DoorSyncMessageName = "Phoney_DoorSync_v1";
     private bool _registered;
 
     // ─── Registration ───────────────────────────────────────────────────────
@@ -42,8 +43,9 @@ public class PhoneyNetworkManager
         nm.CustomMessagingManager.RegisterNamedMessageHandler(ItemDropMessageName, OnReceiveItemDropMessage);
         nm.CustomMessagingManager.RegisterNamedMessageHandler(ItemValueMessageName, OnReceiveItemValueMessage);
         nm.CustomMessagingManager.RegisterNamedMessageHandler(DemonicSyncMessageName, OnReceiveDemonicSyncMessage);
+        nm.CustomMessagingManager.RegisterNamedMessageHandler(DoorSyncMessageName, OnReceiveDoorSyncMessage);
         _registered = true;
-        PhoneyPlugin.Logger.LogInfo("[Network] Registered Phoney network message handlers (voice + scrap + value + demonic sync).");
+        PhoneyPlugin.Logger.LogInfo("[Network] Registered Phoney network message handlers (voice + scrap + value + demonic + door sync).");
     }
 
     public void Unregister()
@@ -56,6 +58,7 @@ public class PhoneyNetworkManager
             nm.CustomMessagingManager.UnregisterNamedMessageHandler(ItemDropMessageName);
             nm.CustomMessagingManager.UnregisterNamedMessageHandler(ItemValueMessageName);
             nm.CustomMessagingManager.UnregisterNamedMessageHandler(DemonicSyncMessageName);
+            nm.CustomMessagingManager.UnregisterNamedMessageHandler(DoorSyncMessageName);
         }
         _registered = false;
     }
@@ -324,6 +327,50 @@ public class PhoneyNetworkManager
             {
                 MaskedScrapManager.ApplyTaintLocally(grabbable, newValue, distortedName);
                 PhoneyPlugin.Logger.LogDebug($"[Network] Received item taint update: item='{distortedName}' ({itemNetId}) -> ${newValue}");
+            }
+        }
+    }
+
+    public void SyncDoorInteraction(MaskedPlayerEnemy? enemy, Vector3 doorPos, bool isUsingDoor)
+    {
+        var nm = NetworkManager.Singleton;
+        if (nm == null || nm.CustomMessagingManager == null) return;
+        if (enemy == null || enemy.NetworkObject == null) return;
+        if (!nm.IsServer && !nm.IsHost) return;
+
+        ulong enemyNetId = enemy.NetworkObject.NetworkObjectId;
+        const int bufferSize = sizeof(ulong) + sizeof(float) * 3 + sizeof(bool);
+        using var writer = new FastBufferWriter(bufferSize, Allocator.Temp);
+        writer.WriteValueSafe(enemyNetId);
+        writer.WriteValueSafe(doorPos.x);
+        writer.WriteValueSafe(doorPos.y);
+        writer.WriteValueSafe(doorPos.z);
+        writer.WriteValueSafe(isUsingDoor);
+
+        nm.CustomMessagingManager.SendNamedMessageToAll(DoorSyncMessageName, writer);
+        PhoneyPlugin.Logger.LogDebug($"[Network] Broadcasted door interaction: enemy={enemyNetId} doorPos={doorPos} usingDoor={isUsingDoor}");
+    }
+
+    private void OnReceiveDoorSyncMessage(ulong senderClientId, FastBufferReader reader)
+    {
+        const int size = sizeof(ulong) + sizeof(float) * 3 + sizeof(bool);
+        if (!reader.TryBeginRead(size)) return;
+
+        reader.ReadValueSafe(out ulong enemyNetId);
+        reader.ReadValueSafe(out float x);
+        reader.ReadValueSafe(out float y);
+        reader.ReadValueSafe(out float z);
+        reader.ReadValueSafe(out bool isUsingDoor);
+
+        var nm = NetworkManager.Singleton;
+        if (nm == null) return;
+
+        if (nm.SpawnManager.SpawnedObjects.TryGetValue(enemyNetId, out var enemyObj) && enemyObj != null)
+        {
+            var ai = enemyObj.GetComponent<PhoneyDeceptiveAI>();
+            if (ai != null)
+            {
+                ai.SetDoorInteraction(new Vector3(x, y, z), isUsingDoor);
             }
         }
     }

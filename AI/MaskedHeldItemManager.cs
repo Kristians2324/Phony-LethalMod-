@@ -199,6 +199,30 @@ public static class MaskedHeldItemManager
                            ?? FindBone(masked.transform, "hand.R")
                            ?? FindBone(masked.transform, "RightHand");
 
+        if (handBone != null && !handBone.name.Equals("serverItemHolder", StringComparison.OrdinalIgnoreCase))
+        {
+            var childHolder = handBone.Find("serverItemHolder");
+            if (childHolder == null)
+            {
+                var holderObj = new GameObject("serverItemHolder");
+                holderObj.transform.SetParent(handBone, false);
+                Transform? templateHolder = StartOfRound.Instance?.allPlayerScripts?.FirstOrDefault(p => p != null && p.serverItemHolder != null)?.serverItemHolder;
+                if (templateHolder != null)
+                {
+                    holderObj.transform.localPosition = templateHolder.localPosition;
+                    holderObj.transform.localRotation = templateHolder.localRotation;
+                    holderObj.transform.localScale = templateHolder.localScale;
+                }
+                else
+                {
+                    holderObj.transform.localPosition = new Vector3(-0.02f, 0.04f, -0.05f);
+                    holderObj.transform.localRotation = Quaternion.identity;
+                }
+                childHolder = holderObj.transform;
+            }
+            handBone = childHolder;
+        }
+
         var holder = masked.gameObject.GetComponent<MaskedHeldItemHolder>()
                      ?? masked.gameObject.AddComponent<MaskedHeldItemHolder>();
         holder.Initialize(masked, handBone);
@@ -330,6 +354,15 @@ public static class MaskedHeldItemManager
             {
                 masked.creatureAnimator.ResetTrigger("SwitchHoldAnimation");
                 masked.creatureAnimator.SetTrigger("SwitchHoldAnimation");
+            }
+
+            if (!string.IsNullOrEmpty(itemDef.grabAnim))
+            {
+                try
+                {
+                    masked.creatureAnimator.SetBool(itemDef.grabAnim, true);
+                }
+                catch { }
             }
         }
 

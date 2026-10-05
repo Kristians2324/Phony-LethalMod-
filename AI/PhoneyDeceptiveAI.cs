@@ -68,6 +68,7 @@ public class PhoneyDeceptiveAI : MonoBehaviour
     private float _nextParanoiaCheckTime;
     private float _hostilityChance;
     private bool  _isHostilePrimed;
+    private float _hostilePrimedTime;
     private float _lastParanoiaLogTime;
     private float _lastPrimedStatusLogTime;
 
@@ -90,6 +91,7 @@ public class PhoneyDeceptiveAI : MonoBehaviour
     private float   _nextLeashRepickTime;
     private float   _nextPersonalSpaceTime;
     private float   _attendPlayerUntil;
+    private float   _attendPlayerCooldown;
     private readonly Queue<Vector3> _recentRoomTargets = new();
 
     private void SetSubState(UndercoverSubState next, string reason = "")
@@ -462,33 +464,28 @@ public class PhoneyDeceptiveAI : MonoBehaviour
                     PhoneyPlugin.Logger.LogInfo(
                         $"[DeceptiveAI] '{Masked.gameObject.name}' 2-MINUTE ATTACK ROLL: Rolled {roll:P1} < chance {_hostilityChance:P1} -> HOSTILE! Checking player proximity...");
 
-                    float aggroRange = PhoneyPlugin.AmbushDistanceThreshold != null
-                        ? PhoneyPlugin.AmbushDistanceThreshold.Value
-                        : 5.5f;
-
                     PlayerControllerB? target = TargetPlayer != null && IsPlayerValidTarget(TargetPlayer)
                         ? TargetPlayer
                         : GetClosestLivingPlayer(out _);
 
-                    // If a target player is already nearby or visible, launch ambush attack immediately!
-                    if (target != null && (Vector3.Distance(transform.position, target.transform.position) <= aggroRange || HasLineOfSight(target)))
+                    // Opportunistic ambush check: strike immediately only if back is turned, bumped, or cornered!
+                    if (target != null && ShouldExecuteOpportunisticAmbush(target, out string ambushReason))
                     {
-                        float dist = Vector3.Distance(transform.position, target.transform.position);
-                        bool los = HasLineOfSight(target);
                         PhoneyPlugin.Logger.LogInfo(
-                            $"[DeceptiveAI] '{Masked.gameObject.name}' Target player '{target.playerUsername}' is nearby/visible (dist: {dist:F1}m <= {aggroRange:F1}m, LOS: {los}) — AMBUSH STRIKE!");
+                            $"[DeceptiveAI] '{Masked.gameObject.name}' Target player '{target.playerUsername}' opportunistic attack ({ambushReason}) — AMBUSH STRIKE!");
                         TargetPlayer = target;
                         _isHostilePrimed = false;
                         TransitionTo(MimicPhase.AmbushStrike);
                     }
                     else
                     {
-                        // No player is immediately present: prime hostility so the mimic attacks the moment a player enters aggro range
+                        // Disguise sustained: prime hostility so the mimic stalks and bides its time for a backstab
                         _isHostilePrimed = true;
+                        _hostilePrimedTime = Time.time;
                         _nextParanoiaCheckTime = Time.time + PhoneyPlugin.ParanoiaIntervalSeconds.Value;
                         _lastParanoiaLogTime = Time.time;
                         PhoneyPlugin.Logger.LogInfo(
-                            $"[DeceptiveAI] '{Masked.gameObject.name}' 2-minute attack roll hostile, but no player currently in range ({aggroRange:F1}m) or line of sight. Hostility primed! Next roll in {PhoneyPlugin.ParanoiaIntervalSeconds.Value:F0}s.");
+                            $"[DeceptiveAI] '{Masked.gameObject.name}' 2-minute attack roll hostile! Disguise maintained, biding time for opportunistic backstab/bump. Next roll in {PhoneyPlugin.ParanoiaIntervalSeconds.Value:F0}s.");
                     }
                 }
                 else
@@ -503,14 +500,11 @@ public class PhoneyDeceptiveAI : MonoBehaviour
             }
 
             // ── Hostility Primed Check (From 2-Minute Timer Roll) ─────────────────
-            // A mimic ONLY attacks when the 2-minute hostility roll has succeeded!
-            // It NEVER attacks just because a player walks near it while peaceful.
+            // A mimic ONLY attacks when the 2-minute hostility roll has succeeded AND an opportunistic window opens!
+            // It NEVER attacks just because a player walks near it while peaceful or while player is watching it.
             if (_isHostilePrimed)
             {
                 PlayerControllerB? closePlayer = GetClosestLivingPlayer(out float playerDist);
-                float aggroRange = PhoneyPlugin.AmbushDistanceThreshold != null
-                    ? PhoneyPlugin.AmbushDistanceThreshold.Value
-                    : 5.5f;
 
                 // Throttled heartbeat log for primed status (every 10s)
                 if (Time.time >= _lastPrimedStatusLogTime + 10f)
@@ -518,21 +512,19 @@ public class PhoneyDeceptiveAI : MonoBehaviour
                     _lastPrimedStatusLogTime = Time.time;
                     string pInfo = closePlayer != null ? $"'{closePlayer.playerUsername}' at {playerDist:F1}m" : "none in area";
                     PhoneyPlugin.Logger.LogInfo(
-                        $"[DeceptiveAI] '{Masked.gameObject.name}' Hostility is PRIMED: waiting for player in aggro range ({aggroRange:F1}m) or LOS (closest: {pInfo}).");
+                        $"[DeceptiveAI] '{Masked.gameObject.name}' Hostility is PRIMED: waiting for opportunistic backstab/bump window (closest: {pInfo}, elapsed: {Time.time - _hostilePrimedTime:F0}s).");
                 }
 
                 if (closePlayer != null)
                 {
-                    bool isInAggroRange = playerDist <= aggroRange;
                     bool isGreetingActive = _subState == UndercoverSubState.Greeting && _performingCrouch;
-                    bool los = HasLineOfSight(closePlayer);
-
-                    if (!isGreetingActive && (isInAggroRange || (playerDist <= 10f && los)))
+                    if (!isGreetingActive && ShouldExecuteOpportunisticAmbush(closePlayer, out string ambushReason))
                     {
                         PhoneyPlugin.Logger.LogInfo(
-                            $"[DeceptiveAI] '{Masked.gameObject.name}' Primed hostility triggered! Player '{closePlayer.playerUsername}' in range ({playerDist:F1}m <= {aggroRange:F1}m, LOS: {los}) — AMBUSH STRIKE!");
+                            $"[DeceptiveAI] '{Masked.gameObject.name}' Primed hostility triggered! Opportunistic attack on '{closePlayer.playerUsername}' ({ambushReason}) — AMBUSH STRIKE!");
                         TargetPlayer = closePlayer;
                         _isHostilePrimed = false;
+                        TransitionTo(MimicPhase.AmbushStrike);
                     }
                 }
             }
@@ -1116,14 +1108,14 @@ public class PhoneyDeceptiveAI : MonoBehaviour
             if (leash > hardLimit)
             {
                 SetSubState(UndercoverSubState.SeekingPlayer, $"Player beyond hard leash ({leash:F1}m > {hardLimit:F0}m), catching up");
-                SetDestinationSafe(player.transform.position);
+                SetDestinationSafe(player!.transform.position);
                 UpdateStaminaAndSpeed(player.transform.position);
                 return;
             }
 
             // Current room target has drifted out of the player's band (they walked off) or we're past the soft
             // limit: commit to a NEW room inside the band. Throttled so the target isn't re-rolled every AI tick.
-            bool roomOutOfBand = Vector3.Distance(_currentRoomTarget, player.transform.position) > softLimit;
+            bool roomOutOfBand = Vector3.Distance(_currentRoomTarget, player!.transform.position) > softLimit;
             if ((leash > softLimit || roomOutOfBand) && Time.time >= _nextLeashRepickTime)
             {
                 _nextLeashRepickTime = Time.time + 2.0f;
@@ -1366,7 +1358,7 @@ public class PhoneyDeceptiveAI : MonoBehaviour
                 Masked.LookAtPosition(doorPos, 0.6f);
             }
 
-            if (distToDoor <= 1.25f && interiorDoor != null)
+            if (distToDoor <= 0.95f && interiorDoor != null)
             {
                 StartCoroutine(DoorTransitionRoutine(interiorDoor, toOutside: true, onComplete: () =>
                 {
@@ -1530,7 +1522,7 @@ public class PhoneyDeceptiveAI : MonoBehaviour
             Masked.LookAtPosition(doorPos, 0.6f);
         }
 
-        if (dist <= 1.25f && outsideDoor != null)
+        if (dist <= 0.95f && outsideDoor != null)
         {
             StartCoroutine(DoorTransitionRoutine(outsideDoor, toOutside: false, onComplete: () =>
             {
@@ -1689,25 +1681,27 @@ public class PhoneyDeceptiveAI : MonoBehaviour
 
         Vector3 doorPos = MaskedScrapManager.GetDoorPosition(door);
         DoorInteractionTarget = doorPos;
+        PhoneyNetworkManager.Instance.SyncDoorInteraction(Masked, doorPos, true);
         float distToDoor = Vector3.Distance(transform.position, doorPos);
         PhoneyPlugin.Logger.LogInfo(
             $"[Door] '{Masked.gameObject.name}' approaching door '{door.gameObject.name}' (distance: {distToDoor:F2}m, toOutside: {toOutside}). Initiating interaction.");
 
-        // Realism enforcement: Real players stand within ~1.2m of the door handle.
-        // If the mimic is further than 1.25m, walk directly towards doorPos until <= 1.25m (with timeout).
-        if (distToDoor > 1.25f && Masked.agent != null && Masked.agent.isOnNavMesh)
+        // Realism enforcement: Real players stand practically next to the door handle (<= 0.95m).
+        // If the mimic is further than 0.95m, walk directly towards doorPos until <= 0.95m (with timeout).
+        if (distToDoor > 0.95f && Masked.agent != null && Masked.agent.isOnNavMesh)
         {
             SetDestinationSafe(doorPos);
             NavMeshUtil.SafeSetStopped(Masked.agent, false);
             NavMeshUtil.SafeSetSpeed(Masked.agent, WalkSpeed);
-            float approachTimeout = 2.5f;
+            float approachTimeout = 3.5f;
             float elapsedApproach = 0f;
-            while (Vector3.Distance(transform.position, doorPos) > 1.25f && elapsedApproach < approachTimeout)
+            while (Vector3.Distance(transform.position, doorPos) > 0.95f && elapsedApproach < approachTimeout)
             {
                 if (Masked == null || Masked.isEnemyDead)
                 {
                     _isUsingDoor = false;
                     DoorInteractionTarget = Vector3.zero;
+                    PhoneyNetworkManager.Instance.SyncDoorInteraction(Masked, Vector3.zero, false);
                     yield break;
                 }
                 elapsedApproach += Time.deltaTime;
@@ -1734,6 +1728,7 @@ public class PhoneyDeceptiveAI : MonoBehaviour
             {
                 _isUsingDoor = false;
                 DoorInteractionTarget = Vector3.zero;
+                PhoneyNetworkManager.Instance.SyncDoorInteraction(Masked, Vector3.zero, false);
                 yield break;
             }
             elapsedTurn += Time.deltaTime;
@@ -1772,6 +1767,7 @@ public class PhoneyDeceptiveAI : MonoBehaviour
                 try { door.FinishOpeningEntrance(); } catch { }
                 _isUsingDoor = false;
                 DoorInteractionTarget = Vector3.zero;
+                PhoneyNetworkManager.Instance.SyncDoorInteraction(Masked, Vector3.zero, false);
                 yield break;
             }
             elapsedHold += Time.deltaTime;
@@ -1813,6 +1809,7 @@ public class PhoneyDeceptiveAI : MonoBehaviour
         }
         _isUsingDoor = false;
         DoorInteractionTarget = Vector3.zero;
+        PhoneyNetworkManager.Instance.SyncDoorInteraction(Masked, Vector3.zero, false);
         PhoneyPlugin.Logger.LogInfo($"[Door] '{Masked?.gameObject.name}' door transition complete. Resuming navigation.");
 
         onComplete?.Invoke();
@@ -1947,45 +1944,28 @@ public class PhoneyDeceptiveAI : MonoBehaviour
                     PhoneyPlugin.Logger.LogInfo(
                         $"[Ladder] '{Masked.gameObject.name}' reached ladder with two-handed item '{_scrapManager?.HeldScrap?.itemProperties?.itemName ?? "Item"}' (DeltaY={deltaY:F2}m). Enforcing realistic player mechanics.");
 
-                    if (deltaY < -1.2f)
+                    // Real player behavior: players cannot climb or descend ladders with two-handed items. Drop it at the approach!
+                    droppedLadderScrap = _scrapManager?.HeldScrap;
+                    if (droppedLadderScrap != null)
                     {
-                        // Descending ladder:
-                        // Real player behavior: drop the two-handed item down to the lower landing before descending!
-                        droppedLadderScrap = _scrapManager?.HeldScrap;
-                        if (droppedLadderScrap != null)
+                        // Align facing toward ladder before staging/dropping
+                        float turnTime = 0.2f;
+                        float elapsedTurn = 0f;
+                        Quaternion startRot = transform.rotation;
+                        Quaternion dropRot = Quaternion.LookRotation(ladderFaceDir);
+                        while (elapsedTurn < turnTime)
                         {
-                            // Align facing toward ladder before dropping
-                            float turnTime = 0.2f;
-                            float elapsedTurn = 0f;
-                            Quaternion startRot = transform.rotation;
-                            Quaternion dropRot = Quaternion.LookRotation(ladderFaceDir);
-                            while (elapsedTurn < turnTime)
-                            {
-                                if (Masked == null || Masked.isEnemyDead) yield break;
-                                elapsedTurn += Time.deltaTime;
-                                transform.rotation = Quaternion.Slerp(startRot, dropRot, elapsedTurn / turnTime);
-                                yield return null;
-                            }
+                            if (Masked == null || Masked.isEnemyDead) yield break;
+                            elapsedTurn += Time.deltaTime;
+                            transform.rotation = Quaternion.Slerp(startRot, dropRot, elapsedTurn / turnTime);
+                            yield return null;
+                        }
 
-                            // Drop the scrap down to endPos (lower landing)
-                            _scrapManager?.DropRealScrap(endPos, isElevatorStaged: false, isLadderStaged: true);
-                            PhoneyPlugin.Logger.LogInfo(
-                                $"[Ladder] '{Masked.gameObject.name}' dropped two-handed item down to lower floor at {endPos} before climbing down!");
-                            yield return new WaitForSeconds(0.35f);
-                        }
-                    }
-                    else
-                    {
-                        // Ascending ladder:
-                        // Real player behavior: players cannot climb up ladders with two-handed items. Drop it at the base!
-                        droppedLadderScrap = _scrapManager?.HeldScrap;
-                        if (droppedLadderScrap != null)
-                        {
-                            _scrapManager?.DropRealScrap(startPos, isElevatorStaged: false, isLadderStaged: true);
-                            PhoneyPlugin.Logger.LogInfo(
-                                $"[Ladder] '{Masked.gameObject.name}' dropped two-handed item at ladder base {startPos} before climbing up!");
-                            yield return new WaitForSeconds(0.35f);
-                        }
+                        // Drop the two-handed scrap at current approach position (startPos)
+                        _scrapManager?.DropRealScrap(startPos, isElevatorStaged: false, isLadderStaged: true);
+                        PhoneyPlugin.Logger.LogInfo(
+                            $"[Ladder] '{Masked.gameObject.name}' dropped two-handed item at ladder approach {startPos} before traversing ladder!");
+                        yield return new WaitForSeconds(0.35f);
                     }
                 }
                 else if (heldOneHanded != null)
@@ -2173,29 +2153,6 @@ public class PhoneyDeceptiveAI : MonoBehaviour
                     Masked.creatureAnimator.SetBool("IsMoving", false);
                     Masked.creatureAnimator.SetFloat("VelocityZ", 0f);
                 }
-            }
-
-            // If a two-handed item was dropped down the ladder, retrieve it from the floor now!
-            if (droppedLadderScrap != null && deltaY < -1.2f && !droppedLadderScrap.isHeld && _scrapManager != null)
-            {
-                if (Masked?.creatureAnimator != null)
-                {
-                    Masked.creatureAnimator.SetBool("crouching", true);
-                }
-                yield return new WaitForSeconds(0.35f);
-
-                if (Masked != null && !Masked.isEnemyDead && droppedLadderScrap != null && !droppedLadderScrap.isHeld)
-                {
-                    _scrapManager.PickUpRealScrap(droppedLadderScrap);
-                    PhoneyPlugin.Logger.LogInfo(
-                        $"[Ladder] '{Masked.gameObject.name}' retrieved dropped two-handed item '{droppedLadderScrap.itemProperties?.itemName ?? "Item"}' at base of ladder!");
-                }
-
-                if (Masked?.creatureAnimator != null)
-                {
-                    Masked.creatureAnimator.SetBool("crouching", false);
-                }
-                yield return new WaitForSeconds(0.15f);
             }
         }
         finally
@@ -2641,46 +2598,200 @@ public class PhoneyDeceptiveAI : MonoBehaviour
             return;
         }
 
-        Vector3 center = player != null ? player.transform.position : transform.position;
+        Vector3 center = (player != null && IsSameEnvironment(player)) ? player.transform.position : transform.position;
 
-        // When inside facility and accompanying a crewmate, prioritize rooms/hallways close to the player (3.5m - 12m)
-        // so the mimic feels like a loyal, observant squadmate exploring alongside them!
-        bool stayClose = !Masked.isOutside && player != null && player.isInsideFactory;
-        float minDist = stayClose ? 3.5f : 10f;
-        float maxDist = stayClose ? 12.0f : 26f;
+        // When inside facility and accompanying a crewmate, roam in a realistic squadmate band (6m - 20m)
+        // so the mimic explores ahead/behind/nearby without crowding (personal space >= 1.8m).
+        bool isInside = !Masked.isOutside;
+        float minDist = isInside ? 6.0f : 8.0f;
+        float maxDist = isInside ? 20.0f : 28.0f;
 
-        var nearby = nodes
+        // Discard candidate nodes that are too close to recent targets to prevent repetitive jitter/pacing
+        var candidates = nodes
             .Where(n => {
                 float d = Vector3.Distance(n.transform.position, center);
-                return d >= minDist && d <= maxDist;
+                if (d < minDist || d > maxDist) return false;
+                foreach (var recent in _recentRoomTargets)
+                {
+                    if (Vector3.Distance(n.transform.position, recent) < 5.0f)
+                        return false;
+                }
+                return true;
             })
             .ToList();
 
-        if (nearby.Count > 0)
+        if (candidates.Count == 0)
         {
-            _currentRoomTarget = nearby[UnityEngine.Random.Range(0, nearby.Count)].transform.position;
+            // If all filtered out by history, relax the history check
+            candidates = nodes
+                .Where(n => {
+                    float d = Vector3.Distance(n.transform.position, center);
+                    return d >= minDist && d <= maxDist;
+                })
+                .ToList();
         }
-        else if (stayClose)
+
+        Vector3 chosen;
+        if (candidates.Count > 0)
         {
-            // Fallback for staying close: sample a position 4m-6m around player on NavMesh
-            Vector3 offset = UnityEngine.Random.insideUnitSphere * 5.0f;
-            offset.y = 0;
-            Vector3 samplePos = center + offset;
-            if (NavMesh.SamplePosition(samplePos, out var hit, 5.0f, NavMesh.AllAreas))
-            {
-                _currentRoomTarget = hit.position;
-            }
-            else
-            {
-                var fallback = nodes.Where(n => Vector3.Distance(n.transform.position, center) < 20f).ToList();
-                _currentRoomTarget = (fallback.Count > 0 ? fallback[UnityEngine.Random.Range(0, fallback.Count)] : nodes[0]).transform.position;
-            }
+            chosen = candidates[UnityEngine.Random.Range(0, candidates.Count)].transform.position;
         }
         else
         {
-            var fallback = nodes.Where(n => Vector3.Distance(n.transform.position, transform.position) < 32f).ToList();
-            _currentRoomTarget = (fallback.Count > 0 ? fallback[UnityEngine.Random.Range(0, fallback.Count)] : nodes[0]).transform.position;
+            // Fallback: sample NavMesh in the band around center
+            Vector2 circle = UnityEngine.Random.insideUnitCircle.normalized * UnityEngine.Random.Range(minDist, maxDist);
+            Vector3 samplePos = center + new Vector3(circle.x, 0, circle.y);
+            if (NavMesh.SamplePosition(samplePos, out var hit, 6.0f, NavMesh.AllAreas))
+            {
+                chosen = hit.position;
+            }
+            else
+            {
+                var fallback = nodes.Where(n => Vector3.Distance(n.transform.position, center) < 32f).ToList();
+                chosen = (fallback.Count > 0 ? fallback[UnityEngine.Random.Range(0, fallback.Count)] : nodes[0]).transform.position;
+            }
         }
+
+        _currentRoomTarget = chosen;
+        _recentRoomTargets.Enqueue(chosen);
+        while (_recentRoomTargets.Count > 4)
+        {
+            _recentRoomTargets.Dequeue();
+        }
+    }
+
+    public bool IsSameEnvironment(PlayerControllerB? player)
+    {
+        if (player == null || Masked == null) return false;
+        return player.isInsideFactory == !Masked.isOutside;
+    }
+
+    public float LeashDistance(PlayerControllerB? player)
+    {
+        if (player == null || Masked == null) return float.MaxValue;
+        return Vector3.Distance(transform.position, player.transform.position);
+    }
+
+    public void GetLeashBand(PlayerControllerB? player, out float minFollow, out float comfortMax, out float softLimit, out float hardLimit)
+    {
+        if (Masked != null && !Masked.isOutside)
+        {
+            minFollow = 5.0f;
+            comfortMax = 15.0f;
+            softLimit = 22.0f;
+            hardLimit = 32.0f;
+        }
+        else
+        {
+            minFollow = 7.0f;
+            comfortMax = 20.0f;
+            softLimit = 30.0f;
+            hardLimit = 42.0f;
+        }
+    }
+
+    public Vector3 GetScrapLeashCenter(PlayerControllerB? player, out float scrapLeashRadius)
+    {
+        if (player != null && IsSameEnvironment(player))
+        {
+            scrapLeashRadius = 22.0f;
+            return player.transform.position;
+        }
+        scrapLeashRadius = 20.0f;
+        return transform.position;
+    }
+
+    public bool UpdateAttendPlayer(PlayerControllerB? player)
+    {
+        if (player == null || Masked == null || _isUsingDoor || _isTraversingOffMeshLink || _isPickingUpScrap)
+            return false;
+
+        // If currently attending player (paused to look at them after being approached or spoken to)
+        if (Time.time < _attendPlayerUntil)
+        {
+            NavMeshUtil.SafeSetStopped(Masked.agent, true);
+            NavMeshUtil.SafeSetVelocity(Masked.agent, Vector3.zero);
+
+            Vector3 lookDir = (player.transform.position - transform.position).normalized;
+            lookDir.y = 0;
+            if (lookDir != Vector3.zero)
+            {
+                transform.rotation = Quaternion.Slerp(transform.rotation, Quaternion.LookRotation(lookDir), Time.deltaTime * 6f);
+            }
+            Masked.stareAtTransform = null;
+            Masked.LookAtPosition(player.gameplayCamera != null ? player.gameplayCamera.transform.position : (player.transform.position + Vector3.up * 1.5f), 0.5f);
+            return true;
+        }
+
+        // Trigger attending if player is close (< 3.8m), has LOS, and is looking at the mimic
+        if (IsSameEnvironment(player) && Vector3.Distance(transform.position, player.transform.position) <= 3.8f && HasLineOfSight(player))
+        {
+            Vector3 toMimic = (transform.position - player.transform.position).normalized;
+            Vector3 playerLook = player.gameplayCamera != null ? player.gameplayCamera.transform.forward : player.transform.forward;
+            bool playerLookingAtMimic = Vector3.Dot(playerLook, toMimic) > 0.65f;
+
+            if (playerLookingAtMimic && Time.time >= _attendPlayerCooldown)
+            {
+                _attendPlayerCooldown = Time.time + UnityEngine.Random.Range(8.0f, 15.0f);
+                _attendPlayerUntil = Time.time + UnityEngine.Random.Range(1.5f, 3.0f);
+
+                NavMeshUtil.SafeSetStopped(Masked.agent, true);
+                NavMeshUtil.SafeSetVelocity(Masked.agent, Vector3.zero);
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    public void SetDoorInteraction(Vector3 doorPos, bool isUsingDoor)
+    {
+        _isUsingDoor = isUsingDoor;
+        DoorInteractionTarget = doorPos;
+        if (Masked != null && isUsingDoor)
+        {
+            Masked.stareAtTransform = null;
+            Masked.targetPlayer = null;
+        }
+    }
+
+    private bool ShouldExecuteOpportunisticAmbush(PlayerControllerB target, out string reason)
+    {
+        reason = string.Empty;
+        if (target == null || Masked == null) return false;
+
+        float dist = Vector3.Distance(transform.position, target.transform.position);
+
+        // 1. Direct physical collision / bumping into mimic (< 1.4m)
+        if (dist <= 1.4f)
+        {
+            reason = $"Player collided / bumped into mimic ({dist:F1}m <= 1.4m)";
+            return true;
+        }
+
+        // 2. Backstab / Back turned: Player has their back turned to the mimic within 4.5m
+        if (dist <= 4.5f)
+        {
+            Vector3 toMimic = (transform.position - target.transform.position).normalized;
+            Vector3 playerFacing = target.gameplayCamera != null ? target.gameplayCamera.transform.forward : target.transform.forward;
+            float facingDot = Vector3.Dot(playerFacing, toMimic);
+
+            // facingDot < -0.2f means player is looking away from mimic
+            if (facingDot < -0.2f)
+            {
+                reason = $"Player turned back on mimic ({dist:F1}m, dot={facingDot:F2})";
+                return true;
+            }
+        }
+
+        // 3. Stalking patience timeout: Mimic has stalked in primed state for > 45 seconds without opportunity
+        if (_isHostilePrimed && (Time.time - _hostilePrimedTime > 45f) && dist <= 6.0f)
+        {
+            reason = $"Stalking patience elapsed ({Time.time - _hostilePrimedTime:F0}s > 45s, dist={dist:F1}m)";
+            return true;
+        }
+
+        return false;
     }
 
     private void TriggerAmbushScream()

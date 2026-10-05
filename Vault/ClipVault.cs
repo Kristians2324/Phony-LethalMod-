@@ -51,12 +51,22 @@ public class ClipVault
     }
 
     private readonly ConcurrentDictionary<string, float> _recentlyPlayed = new();
+    private readonly Queue<string> _recentClipsHistory = new();
 
     public void RecordClipPlayed(RecordedClip clip)
     {
         if (clip != null && !string.IsNullOrWhiteSpace(clip.Transcript))
         {
-            _recentlyPlayed[clip.Transcript.Trim().ToLowerInvariant()] = Time.time;
+            string key = clip.Transcript.Trim().ToLowerInvariant();
+            _recentlyPlayed[key] = Time.time;
+            lock (_lock)
+            {
+                _recentClipsHistory.Enqueue(key);
+                while (_recentClipsHistory.Count > 6)
+                {
+                    _recentClipsHistory.Dequeue();
+                }
+            }
         }
     }
 
@@ -79,12 +89,12 @@ public class ClipVault
                 .OrderByDescending(x => x.Score)
                 .ToList();
 
-            // Diversity & Variety: pick randomly among the top-tier candidates (within 18 points of the top score)
-            // so the mimic cycles through different greetings and funny jokes instead of always repeating #1!
+            // Diversity & Variety: pick randomly among the top-tier candidates (within 25 points of the top score)
+            // so the mimic cycles through different greetings and funny lines instead of repeating the same one!
             if (scored.Count > 0)
             {
                 float bestScore = scored[0].Score;
-                var topCandidates = scored.Where(x => x.Score >= bestScore - 18f).Take(3).ToList();
+                var topCandidates = scored.Where(x => x.Score >= bestScore - 25f).Take(4).ToList();
                 return topCandidates[UnityEngine.Random.Range(0, topCandidates.Count)].Clip;
             }
 
@@ -120,9 +130,13 @@ public class ClipVault
             var candid = clips.Where(c => c.Intent != SemanticIntent.WarningPanic).ToList();
             if (candid.Count == 0) return null;
 
-            // Filter out recently played clips (cooldown: 40s)
+            // Filter out recently played clips (history check + 75s cooldown)
             var fresh = candid
-                .Where(c => !_recentlyPlayed.TryGetValue(c.Transcript.Trim().ToLowerInvariant(), out float t) || Time.time - t > 40f)
+                .Where(c => {
+                    string key = c.Transcript.Trim().ToLowerInvariant();
+                    if (_recentClipsHistory.Contains(key)) return false;
+                    return !_recentlyPlayed.TryGetValue(key, out float t) || Time.time - t > 75f;
+                })
                 .ToList();
 
             if (fresh.Count > 0)
@@ -144,7 +158,11 @@ public class ClipVault
             if (matching.Count > 0)
             {
                 var fresh = matching
-                    .Where(c => !_recentlyPlayed.TryGetValue(c.Transcript.Trim().ToLowerInvariant(), out float t) || Time.time - t > 60f)
+                    .Where(c => {
+                        string key = c.Transcript.Trim().ToLowerInvariant();
+                        if (_recentClipsHistory.Contains(key)) return false;
+                        return !_recentlyPlayed.TryGetValue(key, out float t) || Time.time - t > 75f;
+                    })
                     .ToList();
                 if (fresh.Count > 0)
                     return fresh[UnityEngine.Random.Range(0, fresh.Count)];
@@ -306,16 +324,24 @@ public class ClipVault
         if (clip.ContainsProfanity)
             score += 18f;
 
-        // Anti-Repetition: if this clip was played recently, penalize it so fresh clips are preferred
+        // Anti-Repetition: if this clip was played in the last 6 lines, heavily penalize it (-300f)!
         if (!string.IsNullOrWhiteSpace(clip.Transcript))
         {
             string key = clip.Transcript.Trim().ToLowerInvariant();
+            lock (_lock)
+            {
+                if (_recentClipsHistory.Contains(key))
+                {
+                    score -= 300f;
+                }
+            }
+
             if (_recentlyPlayed.TryGetValue(key, out float lastPlayed))
             {
                 float timeSincePlayed = Time.time - lastPlayed;
-                if (timeSincePlayed < 40f)
+                if (timeSincePlayed < 75f)
                 {
-                    score -= Mathf.Lerp(60f, 0f, timeSincePlayed / 40f);
+                    score -= Mathf.Lerp(150f, 0f, timeSincePlayed / 75f);
                 }
             }
         }
@@ -360,6 +386,7 @@ public class ClipVault
                 list.Clear();
             }
             _playerClips.Clear();
+            _recentClipsHistory.Clear();
             PhoneyPlugin.Logger.LogInfo("[ClipVault] Cleared all stored voice clips.");
         }
     }

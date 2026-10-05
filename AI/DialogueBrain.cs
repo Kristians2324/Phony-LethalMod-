@@ -24,6 +24,11 @@ public class DialogueBrain
         "mimic", "phony", "phoney", "fake", "impostor", "imposter", "masked", "not real", "aren't real"
     };
 
+    private static readonly string[] ItemExclusionKeywords = new[]
+    {
+        "scrap", "item", "door", "loot", "shotgun", "shovel", "flashlight", "walkie", "apparatus", "money", "body", "corpse", "terminal"
+    };
+
     // ── Pre-compiled Accusation Patterns ─────────────────────────────────────
     private static readonly Regex[] AccusationPatterns = new[]
     {
@@ -77,6 +82,24 @@ public class DialogueBrain
             var match = AccusationPatterns[i].Match(transcript);
             if (match.Success)
             {
+                // Disambiguation: If the utterance is talking about items, scrap, doors, equipment, etc.
+                // (e.g. "not real scrap", "fake item", "fake door", "not a real shotgun"), DO NOT treat it as accusing the mimic!
+                bool refersToItem = false;
+                for (int k = 0; k < ItemExclusionKeywords.Length; k++)
+                {
+                    if (normalized.Contains(ItemExclusionKeywords[k]))
+                    {
+                        refersToItem = true;
+                        break;
+                    }
+                }
+
+                if (refersToItem && !normalized.Contains("you") && !normalized.Contains("u r"))
+                {
+                    // Discussing inanimate object rather than accusing teammate
+                    continue;
+                }
+
                 matchedReason = match.Value;
                 return true;
             }
@@ -87,7 +110,7 @@ public class DialogueBrain
 
     /// <summary>
     /// Unified cognitive evaluation: checks for accusations FIRST (for instant strike reaction),
-    /// then selects a snappy, concise dialogue response with zero perceived lag.
+    /// then selects a snappy, concise dialogue response with an authentic human delay.
     /// </summary>
     public DialogueDecision EvaluateSpeech(
         ulong impersonatedPlayerSteamId,
@@ -99,7 +122,7 @@ public class DialogueBrain
             IsAccusation = false,
             MatchedAccusation = string.Empty,
             ResponseClip = null,
-            ResponseDelay = UnityEngine.Random.Range(0.02f, 0.06f) // Virtually instant response
+            ResponseDelay = UnityEngine.Random.Range(0.35f, 0.70f) // Authentic human reaction delay
         };
 
         if (string.IsNullOrWhiteSpace(incomingPlayerTranscript))
@@ -125,7 +148,7 @@ public class DialogueBrain
     }
 
     /// <summary>
-    /// Selects the best contextual response clip from ClipVault with streamlined classification.
+    /// Selects the best contextual response clip from ClipVault with authentic intent matching and human delay.
     /// </summary>
     public RecordedClip? ChooseResponse(
         ulong impersonatedPlayerSteamId,
@@ -133,8 +156,10 @@ public class DialogueBrain
         bool allowProfanity,
         out float responseDelaySeconds)
     {
-        // Lightning-fast response delay (0.02s - 0.06s)
-        responseDelaySeconds = UnityEngine.Random.Range(0.02f, 0.06f);
+        // Authentic human conversational hesitation (0.35s - 0.70s)
+        float minDelay = 0.35f;
+        float maxDelay = PhoneyPlugin.ResponseDelaySeconds != null ? Mathf.Max(0.45f, PhoneyPlugin.ResponseDelaySeconds.Value) : 0.70f;
+        responseDelaySeconds = UnityEngine.Random.Range(minDelay, maxDelay);
 
         if (string.IsNullOrWhiteSpace(incomingPlayerTranscript))
             return null;
@@ -142,40 +167,45 @@ public class DialogueBrain
         string normalized = incomingPlayerTranscript.ToLowerInvariant().Trim();
         SemanticIntent desiredReplyIntent;
 
-        // Fast intent routing: cuts down redundant analysis passes
+        // Refined intent routing:
         if (normalized.Contains("hey") || normalized.Contains("hello") || normalized.Contains("hi") ||
-            normalized.Contains("yo") || normalized.Contains("sup") || normalized.Contains("who"))
+            normalized.Contains("yo") || normalized.Contains("sup") || normalized.Contains("what's up"))
         {
             float roll = UnityEngine.Random.value;
-            desiredReplyIntent = roll < 0.50f ? SemanticIntent.Greeting : (roll < 0.80f ? SemanticIntent.RawBanter : SemanticIntent.Affirmative);
+            desiredReplyIntent = roll < 0.60f ? SemanticIntent.Greeting : (roll < 0.85f ? SemanticIntent.RawBanter : SemanticIntent.Affirmative);
         }
-        else if (normalized.Contains("where") || normalized.Contains("here") || normalized.Contains("come"))
+        else if (normalized.Contains("where are you") || normalized.Contains("where you at") || normalized.Contains("where is") ||
+                 normalized.Contains("over here") || normalized.Contains("come here") || normalized.Contains("follow me") || normalized.Contains("this way"))
         {
-            desiredReplyIntent = UnityEngine.Random.value > 0.40f ? SemanticIntent.Location : SemanticIntent.RawBanter;
+            desiredReplyIntent = UnityEngine.Random.value > 0.30f ? SemanticIntent.Location : SemanticIntent.Affirmative;
         }
-        else if (normalized.Contains("scrap") || normalized.Contains("apparatus") || normalized.Contains("item") || normalized.Contains("loot"))
+        else if (normalized.Contains("scrap") || normalized.Contains("apparatus") || normalized.Contains("item") ||
+                 normalized.Contains("loot") || normalized.Contains("engine") || normalized.Contains("bottle") || normalized.Contains("valuable"))
         {
-            desiredReplyIntent = UnityEngine.Random.value > 0.50f ? SemanticIntent.LootScrap : SemanticIntent.Affirmative;
+            desiredReplyIntent = UnityEngine.Random.value > 0.40f ? SemanticIntent.LootScrap : SemanticIntent.Affirmative;
         }
-        else if (normalized.Contains("run") || normalized.Contains("monster") || normalized.Contains("look out") || normalized.Contains("help"))
+        else if (normalized.Contains("run") || normalized.Contains("monster") || normalized.Contains("dog") ||
+                 normalized.Contains("bracken") || normalized.Contains("spider") || normalized.Contains("turret") ||
+                 normalized.Contains("look out") || normalized.Contains("help") || normalized.Contains("danger"))
         {
-            desiredReplyIntent = UnityEngine.Random.value > 0.40f ? SemanticIntent.WarningPanic : SemanticIntent.RawBanter;
+            desiredReplyIntent = UnityEngine.Random.value > 0.35f ? SemanticIntent.WarningPanic : SemanticIntent.RawBanter;
         }
-        else if (normalized.Contains("fuck") || normalized.Contains("shit") || normalized.Contains("damn") || normalized.Contains("bitch"))
+        else if (normalized.Contains("fuck") || normalized.Contains("shit") || normalized.Contains("damn") || normalized.Contains("bitch") || normalized.Contains("bro"))
         {
             desiredReplyIntent = SemanticIntent.RawBanter;
         }
-        else if (normalized.Contains("?") || normalized.StartsWith("is ") || normalized.StartsWith("are ") || normalized.StartsWith("did "))
+        else if (normalized.Contains("?") || normalized.StartsWith("is ") || normalized.StartsWith("are ") ||
+                 normalized.StartsWith("did ") || normalized.StartsWith("can ") || normalized.StartsWith("should "))
         {
             float qRoll = UnityEngine.Random.value;
-            desiredReplyIntent = qRoll < 0.50f ? SemanticIntent.Affirmative : (qRoll < 0.80f ? SemanticIntent.Negative : SemanticIntent.RawBanter);
+            desiredReplyIntent = qRoll < 0.55f ? SemanticIntent.Affirmative : (qRoll < 0.85f ? SemanticIntent.Negative : SemanticIntent.RawBanter);
         }
         else
         {
             desiredReplyIntent = UnityEngine.Random.value < 0.55f ? SemanticIntent.RawBanter : SemanticIntent.Affirmative;
         }
 
-        PhoneyPlugin.Logger.LogInfo($"[DialogueBrain] Incoming: \"{incomingPlayerTranscript}\" -> Target Intent: {desiredReplyIntent} (Instant response delay: {responseDelaySeconds:F2}s)");
+        PhoneyPlugin.Logger.LogInfo($"[DialogueBrain] Incoming: \"{incomingPlayerTranscript}\" -> Target Intent: {desiredReplyIntent} (Human response delay: {responseDelaySeconds:F2}s)");
 
         return ClipVault.Instance.FindBestResponse(
             impersonatedPlayerSteamId,

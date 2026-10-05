@@ -1,17 +1,17 @@
 {
   "format": 1,
   "restore": {
-    "c:\\Users\\USER\\Documents\\Lethal mods\\Phoney\\Phoney.csproj": {}
+    "C:\\Users\\USER\\Documents\\Lethal mods\\Phoney\\Phoney.csproj": {}
   },
   "projects": {
-    "c:\\Users\\USER\\Documents\\Lethal mods\\Phoney\\Phoney.csproj": {
+    "C:\\Users\\USER\\Documents\\Lethal mods\\Phoney\\Phoney.csproj": {
       "version": "1.0.0",
       "restore": {
-        "projectUniqueName": "c:\\Users\\USER\\Documents\\Lethal mods\\Phoney\\Phoney.csproj",
+        "projectUniqueName": "C:\\Users\\USER\\Documents\\Lethal mods\\Phoney\\Phoney.csproj",
         "projectName": "com.user.phoney",
-        "projectPath": "c:\\Users\\USER\\Documents\\Lethal mods\\Phoney\\Phoney.csproj",
+        "projectPath": "C:\\Users\\USER\\Documents\\Lethal mods\\Phoney\\Phoney.csproj",
         "packagesPath": "C:\\Users\\USER\\.nuget\\packages\\",
-        "outputPath": "c:\\Users\\USER\\Documents\\Lethal mods\\Phoney\\obj\\",
+        "outputPath": "C:\\Users\\USER\\Documents\\Lethal mods\\Phoney\\obj\\",
         "projectStyle": "PackageReference",
         "configFilePaths": [
           "C:\\Users\\USER\\AppData\\Roaming\\NuGet\\NuGet.Config"

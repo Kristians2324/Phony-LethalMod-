@@ -333,6 +333,41 @@ public class MaskedEnemyPatch
         return true;
     }
 
+    // ─── SetHandsOut RPC Suppression ──────────────────────────────────────────
+
+    [HarmonyPatch("SetHandsOutClientRpc")]
+    [HarmonyPrefix]
+    private static bool SetHandsOutClientRpcPrefix(MaskedPlayerEnemy __instance, ref bool setOut)
+    {
+        if (__instance == null || !PhoneyPlugin.EnableDeceptiveAI.Value) return true;
+        var ai = __instance.gameObject.GetComponent<PhoneyDeceptiveAI>();
+        if (ai != null && ai.CurrentPhase != MimicPhase.AmbushStrike)
+        {
+            setOut = false;
+            __instance.handsOut = false;
+            if (__instance.creatureAnimator != null)
+            {
+                __instance.creatureAnimator.SetBool("HandsOut", false);
+            }
+            return false;
+        }
+        return true;
+    }
+
+    [HarmonyPatch("SetHandsOutServerRpc")]
+    [HarmonyPrefix]
+    private static bool SetHandsOutServerRpcPrefix(MaskedPlayerEnemy __instance, ref bool setOut)
+    {
+        if (__instance == null || !PhoneyPlugin.EnableDeceptiveAI.Value) return true;
+        var ai = __instance.gameObject.GetComponent<PhoneyDeceptiveAI>();
+        if (ai != null && ai.CurrentPhase != MimicPhase.AmbushStrike)
+        {
+            setOut = false;
+            __instance.handsOut = false;
+            return false;
+        }
+        return true;
+    }
 
     // ─── ChooseShipHidingSpot ─────────────────────────────────────────────────
 

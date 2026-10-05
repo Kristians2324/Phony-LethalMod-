@@ -90,7 +90,25 @@ public class MaskedScrapManager : MonoBehaviour
         if (_rightHandBone != null && !_rightHandBone.name.Equals("serverItemHolder", StringComparison.OrdinalIgnoreCase))
         {
             var childHolder = _rightHandBone.Find("serverItemHolder");
-            if (childHolder != null) _rightHandBone = childHolder;
+            if (childHolder == null)
+            {
+                var holderObj = new GameObject("serverItemHolder");
+                holderObj.transform.SetParent(_rightHandBone, false);
+                Transform? templateHolder = StartOfRound.Instance?.allPlayerScripts?.FirstOrDefault(p => p != null && p.serverItemHolder != null)?.serverItemHolder;
+                if (templateHolder != null)
+                {
+                    holderObj.transform.localPosition = templateHolder.localPosition;
+                    holderObj.transform.localRotation = templateHolder.localRotation;
+                    holderObj.transform.localScale = templateHolder.localScale;
+                }
+                else
+                {
+                    holderObj.transform.localPosition = new Vector3(-0.02f, 0.04f, -0.05f);
+                    holderObj.transform.localRotation = Quaternion.identity;
+                }
+                childHolder = holderObj.transform;
+            }
+            _rightHandBone = childHolder;
         }
         _beltBone = FindBeltBone(masked.transform);
         _chestBone = FindChestBone(masked.transform);
@@ -255,7 +273,7 @@ public class MaskedScrapManager : MonoBehaviour
     /// Respects interior vs. exterior environment boundaries.
     /// Outside mimics can collect scrap sitting near the outside entrance door to haul it to the Ship!
     /// </summary>
-    public GrabbableObject? FindNearbyReachableScrap(float maxDistance = 22f, bool forceScan = false)
+    public GrabbableObject? FindNearbyReachableScrap(float maxDistance = 22f, bool forceScan = false, Vector3? center = null, float maxCenterDistance = float.MaxValue)
     {
         if (_masked == null || _masked.isEnemyDead) return null;
         if (!forceScan && Time.time < _nextScanTime) return null;
@@ -287,12 +305,17 @@ public class MaskedScrapManager : MonoBehaviour
             {
                 if (item.itemProperties.twoHanded) continue; // Can't add a two-handed item on top
                 if (HeldScrap?.itemProperties?.twoHanded == true) continue; // Hands full with two-handed
+                if (IsCarryingTwoHanded) continue;
             }
 
             if (item.isHeld || item.isPocketed || item.deactivated || !item.grabbable) continue;
 
             // Ensure matching environment: inside facility vs exterior
             if (item.isInFactory == _masked.isOutside) continue;
+
+            // Filter by companion leash center if provided
+            if (center.HasValue && Vector3.Distance(center.Value, item.transform.position) > maxCenterDistance)
+                continue;
 
             // Items already safely delivered to the ship are strictly untouchable!
             if (IsNearShip(item.transform.position)) continue;
@@ -542,9 +565,11 @@ public class MaskedScrapManager : MonoBehaviour
 
         bool twoHanded = scrap.itemProperties != null && scrap.itemProperties.twoHanded;
 
-        // In vanilla Lethal Company, all held items (one-handed and two-handed) are parented to serverItemHolder.
-        // The animator layers 'HoldingItemsBothHands' and 'HoldingItemsRightHand' position the arms correctly.
-        Transform holdBone = _rightHandBone ?? _heldItemAnchor ?? _chestBone ?? transform;
+        // If two-handed item, attach in front of chest using _heldItemAnchor.
+        // If one-handed item (bottles, brass bells, mugs, etc.), parent strictly to _rightHandBone (serverItemHolder)!
+        Transform holdBone = twoHanded
+            ? (_heldItemAnchor ?? _chestBone ?? _rightHandBone ?? transform)
+            : (_rightHandBone ?? _heldItemAnchor ?? transform);
 
         scrap.parentObject = holdBone;
         scrap.transform.SetParent(holdBone, false);
@@ -565,6 +590,30 @@ public class MaskedScrapManager : MonoBehaviour
             scrap.transform.localRotation = Quaternion.Euler(scrap.itemProperties.rotationOffset);
         }
 
+        // Apply item grab animation triggers to creatureAnimator
+        if (_masked?.creatureAnimator != null && scrap.itemProperties != null)
+        {
+            if (twoHanded)
+            {
+                _masked.creatureAnimator.ResetTrigger("SwitchHoldAnimationTwoHanded");
+                _masked.creatureAnimator.SetTrigger("SwitchHoldAnimationTwoHanded");
+            }
+            else
+            {
+                _masked.creatureAnimator.ResetTrigger("SwitchHoldAnimation");
+                _masked.creatureAnimator.SetTrigger("SwitchHoldAnimation");
+            }
+
+            if (!string.IsNullOrEmpty(scrap.itemProperties.grabAnim))
+            {
+                try
+                {
+                    _masked.creatureAnimator.SetBool(scrap.itemProperties.grabAnim, true);
+                }
+                catch { }
+            }
+        }
+
         // Hide visual tool while carrying real scrap so mimic never holds double items!
         var holder = GetComponent<MaskedHeldItemHolder>();
         if (holder != null)
@@ -574,13 +623,22 @@ public class MaskedScrapManager : MonoBehaviour
         }
 
         PhoneyPlugin.Logger.LogInfo(
-            $"[ScrapManager] Attached primary item '{scrap.itemProperties?.itemName ?? "Item"}' to '{(holdBone != null ? holdBone.name : "null")}' (twoHanded={twoHanded}).");
+            $"[ScrapManager] Attached primary item '{scrap.itemProperties?.itemName ?? "Item"}' to '{(holdBone != null ? holdBone.name : "null")}' (twoHanded={twoHanded}, grabAnim='{scrap.itemProperties?.grabAnim ?? "none"}').");
     }
 
 
     public void ExecuteGrabLocally(GrabbableObject scrap)
     {
         if (scrap == null) return;
+        if (scrap.itemProperties != null && scrap.itemProperties.twoHanded)
+        {
+            // Two-handed item: clear any other items so it is strictly the only item carried!
+            CarriedItems.Clear();
+            CarriedItems.Add(scrap);
+            AttachPrimaryItem(scrap);
+            return;
+        }
+
         if (!CarriedItems.Contains(scrap)) CarriedItems.Add(scrap);
 
         if (CarriedItems[0] == scrap)
@@ -613,6 +671,11 @@ public class MaskedScrapManager : MonoBehaviour
     {
         if (scrap == null) return;
         CarriedItems.Remove(scrap);
+
+        if (_masked?.creatureAnimator != null && scrap.itemProperties != null && !string.IsNullOrEmpty(scrap.itemProperties.grabAnim))
+        {
+            try { _masked.creatureAnimator.SetBool(scrap.itemProperties.grabAnim, false); } catch { }
+        }
 
         // ── 1. Determine drop parent & elevator / ship region ──────────────────
         bool inShip = StartOfRound.Instance != null && StartOfRound.Instance.shipBounds != null 
