@@ -33,8 +33,31 @@ public class MaskedScrapManager : MonoBehaviour
     public GrabbableObject? HeldScrap => CarriedItems.Count > 0 ? CarriedItems[0] : null;
     public bool HasHeldScrap => CarriedItems.Count > 0;
     public int CarriedCount => CarriedItems.Count;
-    public bool IsHoldingTwoHanded => HeldScrap?.itemProperties?.twoHanded == true;
-    public bool IsCarryingTwoHanded => CarriedItems.Any(i => i?.itemProperties?.twoHanded == true);
+    public bool IsHoldingTwoHanded => IsItemTwoHanded(HeldScrap);
+    public bool IsCarryingTwoHanded => CarriedItems.Any(i => IsItemTwoHanded(i));
+
+    /// <summary>
+    /// Accurately identifies whether an item requires authentic two-handed holding.
+    /// Checks itemProperties.twoHanded, itemProperties.twoHandedAnimation (e.g. toilet paper),
+    /// and bulky scrap names (toilet paper, sheet metal, engines, axles, cash registers).
+    /// </summary>
+    public static bool IsItemTwoHanded(GrabbableObject? item)
+    {
+        if (item == null || item.itemProperties == null) return false;
+        var p = item.itemProperties;
+        if (p.twoHanded || p.twoHandedAnimation) return true;
+        string name = p.itemName ?? item.gameObject.name;
+        if (name.IndexOf("toilet", StringComparison.OrdinalIgnoreCase) >= 0 ||
+            name.IndexOf("paper", StringComparison.OrdinalIgnoreCase) >= 0 ||
+            name.IndexOf("sheet", StringComparison.OrdinalIgnoreCase) >= 0 ||
+            name.IndexOf("engine", StringComparison.OrdinalIgnoreCase) >= 0 ||
+            name.IndexOf("axle", StringComparison.OrdinalIgnoreCase) >= 0 ||
+            name.IndexOf("cash", StringComparison.OrdinalIgnoreCase) >= 0)
+        {
+            return true;
+        }
+        return false;
+    }
 
     /// <summary>
     /// Computes the mimic's total carried weight, mirroring vanilla Lethal Company mechanics.
@@ -64,15 +87,12 @@ public class MaskedScrapManager : MonoBehaviour
     public bool CanPickUpMoreScrap()
     {
         // If currently holding a two-handed item, hands are completely occupied - CANNOT pick up anything else!
-        if (HeldScrap != null && HeldScrap.itemProperties != null && HeldScrap.itemProperties.twoHanded)
+        if (IsHoldingTwoHanded)
             return false;
 
         // If any carried item is two-handed, inventory is locked to only that item
-        for (int i = 0; i < CarriedItems.Count; i++)
-        {
-            if (CarriedItems[i]?.itemProperties != null && CarriedItems[i].itemProperties.twoHanded)
-                return false;
-        }
+        if (IsCarryingTwoHanded)
+            return false;
 
         int maxSlots = Mathf.Clamp(PhoneyPlugin.MaxCarriedScrapCount.Value, 1, 4);
         if (CarriedItems.Count >= maxSlots) return false;
@@ -350,6 +370,141 @@ public class MaskedScrapManager : MonoBehaviour
     }
 
     /// <summary>
+    /// Computes a 100% safe, non-glitching landing position when exiting/entering a facility door.
+    /// Specifically engineered for elevated catwalks (such as Experimentation exterior landing):
+    ///   1. Raycasts down against solid physics colliders to find the exact top surface of the catwalk.
+    ///   2. Steps 1.0m forward onto the landing away from the door frame, verifying solid floor underneath.
+    ///   3. Samples NavMesh with a tight 1.2m radius and strictly rejects any sample whose height differs
+    ///      by > 0.8m from the solid floor surface (preventing snapping to the desert terrain 6m below!).
+    /// </summary>
+    public static Vector3 GetSafeDoorExitPosition(EntranceTeleport? door, bool toOutside)
+    {
+        try
+        {
+            if (door == null) door = FindDoor(toOutside);
+            if (door == null) return Vector3.zero;
+
+            if (door.exitScript == null) door.FindExitPoint();
+            EntranceTeleport exitDoor = door.exitScript ?? FindDoor(toOutside) ?? door;
+
+            Transform targetTransform = exitDoor.entrancePoint != null ? exitDoor.entrancePoint : exitDoor.transform;
+            Vector3 rawPos = targetTransform.position;
+            Vector3 forward = targetTransform.forward;
+            forward.y = 0;
+            if (forward.sqrMagnitude < 0.01f) forward = exitDoor.transform.forward;
+            forward.y = 0;
+            if (forward != Vector3.zero) forward.Normalize();
+            else forward = Vector3.forward;
+
+            int mask = StartOfRound.Instance != null 
+                ? StartOfRound.Instance.collidersAndRoomMaskAndDefault 
+                : ~0;
+
+            // 1. Raycast down from rawPos to find solid catwalk/platform floor
+            float floorY = rawPos.y;
+            if (Physics.Raycast(rawPos + Vector3.up * 0.8f, Vector3.down, out var floorHit, 3.5f, mask, QueryTriggerInteraction.Ignore))
+            {
+                floorY = floorHit.point.y;
+            }
+
+            // 2. Candidate step 1.0m forward onto landing
+            Vector3 candidatePos = new Vector3(rawPos.x, floorY, rawPos.z) + forward * 1.0f;
+            if (Physics.Raycast(candidatePos + Vector3.up * 0.8f, Vector3.down, out var forwardHit, 2.5f, mask, QueryTriggerInteraction.Ignore))
+            {
+                if (Mathf.Abs(forwardHit.point.y - floorY) < 0.6f)
+                {
+                    candidatePos = forwardHit.point;
+                    floorY = forwardHit.point.y;
+                }
+                else
+                {
+                    candidatePos = new Vector3(rawPos.x, floorY, rawPos.z) + forward * 0.5f;
+                }
+            }
+            else
+            {
+                candidatePos = new Vector3(rawPos.x, floorY, rawPos.z) + forward * 0.5f;
+            }
+
+            // 3. Tight NavMesh sample (1.2f radius max). Strictly reject ground below!
+            if (NavMesh.SamplePosition(candidatePos, out var navHit, 1.2f, NavMesh.AllAreas))
+            {
+                if (Mathf.Abs(navHit.position.y - floorY) <= 0.8f)
+                {
+                    return navHit.position;
+                }
+            }
+
+            Vector3 doorFloor = new Vector3(rawPos.x, floorY, rawPos.z);
+            if (NavMesh.SamplePosition(doorFloor, out var tightHit, 0.8f, NavMesh.AllAreas))
+            {
+                if (Mathf.Abs(tightHit.position.y - floorY) <= 0.8f)
+                {
+                    return tightHit.position;
+                }
+            }
+
+            return new Vector3(candidatePos.x, floorY + 0.05f, candidatePos.z);
+        }
+        catch (Exception ex)
+        {
+            PhoneyPlugin.Logger.LogWarning($"[ScrapManager] GetSafeDoorExitPosition caught: {ex.Message}");
+            return door != null ? GetDoorNavPosition(door) : Vector3.zero;
+        }
+    }
+
+    /// <summary>
+    /// Computes a safe floor target position on the catwalk/landing outside the main door
+    /// to drop hauled scrap. Clamps using NavMesh.Raycast so it NEVER lands over railings or in midair!
+    /// </summary>
+    public static Vector3 GetOutsideDoorDropPosition(EntranceTeleport? door = null)
+    {
+        try
+        {
+            door ??= FindDoor(wantEntranceToBuilding: true);
+            if (door == null) return Vector3.zero;
+
+            Vector3 doorNavPos = GetDoorNavPosition(door);
+            Transform? doorT = door.exitScript?.entrancePoint ?? door.entrancePoint ?? door.transform;
+            Vector3 forward = doorT.forward;
+            forward.y = 0;
+            if (forward.sqrMagnitude < 0.01f) forward = door.transform.forward;
+            forward.y = 0;
+            if (forward != Vector3.zero) forward.Normalize();
+            else forward = Vector3.forward;
+
+            Vector3 right = doorT.right;
+            right.y = 0;
+            if (right != Vector3.zero) right.Normalize();
+            else right = Vector3.right;
+
+            // Target spot: 1.3m forward, 0.45m to the right (neatly beside walking corridor on the catwalk)
+            Vector3 candidate = doorNavPos + forward * 1.3f + right * 0.45f;
+
+            // Clamping against catwalk railings/walls
+            if (NavMesh.Raycast(doorNavPos, candidate, out var hit, NavMesh.AllAreas))
+            {
+                candidate = hit.position - forward * 0.25f;
+            }
+
+            if (NavMesh.SamplePosition(candidate, out var navHit, 1.0f, NavMesh.AllAreas))
+            {
+                if (Mathf.Abs(navHit.position.y - doorNavPos.y) < 0.8f)
+                {
+                    return navHit.position;
+                }
+            }
+
+            return candidate;
+        }
+        catch (Exception ex)
+        {
+            PhoneyPlugin.Logger.LogWarning($"[ScrapManager] GetOutsideDoorDropPosition caught: {ex.Message}");
+            return door != null ? GetDoorNavPosition(door) : Vector3.zero;
+        }
+    }
+
+    /// <summary>
     /// Scans the map for unheld, reachable scrap items within maxDistance of the mimic.
     /// Respects interior vs. exterior environment boundaries.
     /// Outside mimics can collect scrap sitting near the outside entrance door to haul it to the Ship!
@@ -384,8 +539,8 @@ public class MaskedScrapManager : MonoBehaviour
             // - If holding a two-handed item, skip everything (hands are full)
             if (CarriedItems.Count > 0)
             {
-                if (item.itemProperties.twoHanded) continue; // Can't add a two-handed item on top
-                if (HeldScrap?.itemProperties?.twoHanded == true) continue; // Hands full with two-handed
+                if (IsItemTwoHanded(item)) continue; // Can't add a two-handed item on top
+                if (IsHoldingTwoHanded) continue; // Hands full with two-handed
                 if (IsCarryingTwoHanded) continue;
             }
 
@@ -421,7 +576,7 @@ public class MaskedScrapManager : MonoBehaviour
         if (bestItem != null)
         {
             PhoneyPlugin.Logger.LogInfo(
-                $"[ScrapManager] '{_masked.gameObject.name}' scan detected reachable scrap '{bestItem.itemProperties?.itemName ?? "Item"}' (${bestItem.scrapValue}) at {bestDist:F1}m (twoHanded: {bestItem.itemProperties?.twoHanded == true}).");
+                $"[ScrapManager] '{_masked.gameObject.name}' scan detected reachable scrap '{bestItem.itemProperties?.itemName ?? "Item"}' (${bestItem.scrapValue}) at {bestDist:F1}m (twoHanded: {IsItemTwoHanded(bestItem)}).");
         }
 
         return bestItem;
@@ -500,11 +655,11 @@ public class MaskedScrapManager : MonoBehaviour
         if (scrap.itemProperties != null && !scrap.itemProperties.isScrap) return false;
 
         // If carrying items already, cannot grab a two-handed item!
-        if (CarriedItems.Count > 0 && scrap.itemProperties != null && scrap.itemProperties.twoHanded)
+        if (CarriedItems.Count > 0 && IsItemTwoHanded(scrap))
             return false;
 
         // If holding a two-handed item, cannot grab any more items!
-        if (HeldScrap != null && HeldScrap.itemProperties != null && HeldScrap.itemProperties.twoHanded)
+        if (IsHoldingTwoHanded)
             return false;
 
         ExecuteGrabLocally(scrap);
@@ -636,21 +791,22 @@ public class MaskedScrapManager : MonoBehaviour
 
     /// <summary>
     /// Attaches the primary held scrap item to the mimic's body.
-    /// One-handed items (like bottles, scrap) are parented to the right hand (_rightHandBone / serverItemHolder)
-    /// using official positionOffset and rotationOffset, matching real player hand grip.
-    /// Two-handed items (engines, axles, etc.) are parented to _heldItemAnchor in front of chest.
+    /// In vanilla Lethal Company, ALL held items (one-handed and two-handed) are parented
+    /// directly to serverItemHolder on the right hand.
+    /// itemProperties.positionOffset and rotationOffset are authored specifically for serverItemHolder.
+    /// When HoldingItemsBothHands is active at weight 1.0f on the animator, both hands are brought
+    /// up together in front of the chest cradling the item (such as toilet paper covering vision).
     /// </summary>
     private void AttachPrimaryItem(GrabbableObject scrap)
     {
         if (scrap == null) return;
 
-        bool twoHanded = scrap.itemProperties != null && scrap.itemProperties.twoHanded;
+        bool twoHanded = IsItemTwoHanded(scrap);
 
-        // If two-handed item, attach in front of chest using _heldItemAnchor.
-        // If one-handed item (bottles, brass bells, mugs, etc.), parent strictly to _rightHandBone (serverItemHolder)!
-        Transform holdBone = twoHanded
-            ? (_heldItemAnchor ?? _chestBone ?? _rightHandBone ?? transform)
-            : (_rightHandBone ?? _heldItemAnchor ?? transform);
+        // Vanilla Lethal Company parents ALL held items (both one-handed and two-handed)
+        // to serverItemHolder on the right hand. The animator layer HoldingItemsBothHands
+        // positions both hands and arms up in front of the chest to cradle the item.
+        Transform holdBone = _rightHandBone ?? _heldItemAnchor ?? _chestBone ?? transform;
 
         scrap.parentObject = holdBone;
         scrap.transform.SetParent(holdBone, false);
@@ -674,6 +830,10 @@ public class MaskedScrapManager : MonoBehaviour
         // Apply item grab animation triggers to creatureAnimator
         if (_masked?.creatureAnimator != null && scrap.itemProperties != null)
         {
+            _masked.creatureAnimator.SetBool("GrabValidated", true);
+            _masked.creatureAnimator.SetBool("cancelHolding", false);
+            _masked.creatureAnimator.SetBool("HandsOut", false);
+
             if (twoHanded)
             {
                 _masked.creatureAnimator.ResetTrigger("SwitchHoldAnimationTwoHanded");
@@ -711,7 +871,7 @@ public class MaskedScrapManager : MonoBehaviour
     public void ExecuteGrabLocally(GrabbableObject scrap)
     {
         if (scrap == null) return;
-        if (scrap.itemProperties != null && scrap.itemProperties.twoHanded)
+        if (IsItemTwoHanded(scrap))
         {
             // Two-handed item: pocket any existing carried items so meshes are concealed and items aren't leaked!
             for (int i = 0; i < CarriedItems.Count; i++)

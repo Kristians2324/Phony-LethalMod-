@@ -313,7 +313,7 @@ public static class MaskedHeldItemManager
         string itemName = itemDef.itemName;
         bool isFlashlight = itemName.IndexOf("flashlight", StringComparison.OrdinalIgnoreCase) >= 0;
         bool isPro = isFlashlight && itemName.IndexOf("pro", StringComparison.OrdinalIgnoreCase) >= 0;
-        bool isTwoHanded = itemDef.twoHanded;
+        bool isTwoHanded = itemDef.twoHanded || itemDef.twoHandedAnimation;
 
         var prop = MakeVisualProp(itemDef, isFlashlight: isFlashlight);
         if (prop == null) return;

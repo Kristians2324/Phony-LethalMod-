@@ -118,8 +118,10 @@ public class MaskedHeldItemHolder : MonoBehaviour
 
             if (scrapTwoHanded)
             {
+                // In PlayerControllerB, two-handed items set BOTH HoldingItemsBothHands = 1f
+                // and HoldingItemsRightHand = 1f. This brings both arms up in front of the chest!
                 if (_bothHandsLayer >= 0) Masked.creatureAnimator.SetLayerWeight(_bothHandsLayer, 1f);
-                if (_rightHandLayer >= 0) Masked.creatureAnimator.SetLayerWeight(_rightHandLayer, 0f);
+                if (_rightHandLayer >= 0) Masked.creatureAnimator.SetLayerWeight(_rightHandLayer, 1f);
             }
             else
             {
@@ -127,13 +129,19 @@ public class MaskedHeldItemHolder : MonoBehaviour
                 if (_rightHandLayer >= 0) Masked.creatureAnimator.SetLayerWeight(_rightHandLayer, 1f);
             }
             Masked.creatureAnimator.SetBool("cancelHolding", false);
+            Masked.creatureAnimator.SetBool("GrabValidated", true);
+
+            if (_scrapManager?.HeldScrap?.itemProperties != null && !string.IsNullOrEmpty(_scrapManager.HeldScrap.itemProperties.grabAnim))
+            {
+                try { Masked.creatureAnimator.SetBool(_scrapManager.HeldScrap.itemProperties.grabAnim, true); } catch { }
+            }
         }
         else if (HeldToolProp != null && HeldToolProp.activeSelf)
         {
             if (IsTwoHanded)
             {
                 if (_bothHandsLayer >= 0) Masked.creatureAnimator.SetLayerWeight(_bothHandsLayer, 1f);
-                if (_rightHandLayer >= 0) Masked.creatureAnimator.SetLayerWeight(_rightHandLayer, 0f);
+                if (_rightHandLayer >= 0) Masked.creatureAnimator.SetLayerWeight(_rightHandLayer, 1f);
             }
             else
             {
@@ -141,6 +149,7 @@ public class MaskedHeldItemHolder : MonoBehaviour
                 if (_rightHandLayer >= 0) Masked.creatureAnimator.SetLayerWeight(_rightHandLayer, 1f);
             }
             Masked.creatureAnimator.SetBool("cancelHolding", false);
+            Masked.creatureAnimator.SetBool("GrabValidated", true);
         }
         else
         {

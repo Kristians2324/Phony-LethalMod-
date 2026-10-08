@@ -255,7 +255,103 @@ public class MaskedEnemyPatch
                     __instance.SetCrouchingClientRpc(false);
                 }
             }
+
+            // Enforce authentic player held item animation layers every frame
+            // Real players hold two-handed items (toilet paper, etc.) with both arms raised in front of chest.
+            var holder = __instance.GetComponent<MaskedHeldItemHolder>();
+            var scrapManager = __instance.GetComponent<MaskedScrapManager>();
+            if (holder != null)
+            {
+                bool hasScrap = scrapManager != null && scrapManager.HasHeldScrap;
+                bool isAggressive = ai.CurrentPhase == MimicPhase.AmbushStrike;
+                holder.UpdateAnimationLayers(hasScrap, isAggressive);
+            }
         }
+    }
+
+    // ─── TeleportMaskedEnemy Prefix (Catwalk Floor Fall Prevention) ───────────
+
+    [HarmonyPatch("TeleportMaskedEnemy")]
+    [HarmonyPrefix]
+    [HarmonyPriority(Priority.First)]
+    private static bool TeleportMaskedEnemyPrefix(MaskedPlayerEnemy __instance, Vector3 pos, bool setOutside)
+    {
+        if (__instance == null) return true;
+
+        __instance.timeAtLastUsingEntrance = Time.realtimeSinceStartup;
+
+        Vector3 originalPos = pos;
+        Vector3 safePos = originalPos;
+
+        // Find the matching door (Main Entrance or Fire Exit)
+        EntranceTeleport? door = MaskedScrapManager.FindClosestDoor(originalPos, wantEntranceToBuilding: setOutside);
+        door ??= RoundManager.FindMainEntranceScript(setOutside);
+        door ??= MaskedScrapManager.FindDoor(wantEntranceToBuilding: setOutside);
+
+        if (door != null)
+        {
+            safePos = MaskedScrapManager.GetSafeDoorExitPosition(door, setOutside);
+        }
+        else
+        {
+            if (UnityEngine.AI.NavMesh.SamplePosition(originalPos, out var navHit, 1.2f, UnityEngine.AI.NavMesh.AllAreas))
+            {
+                if (Mathf.Abs(navHit.position.y - originalPos.y) < 0.8f)
+                {
+                    safePos = navHit.position;
+                }
+            }
+        }
+
+        // Face mimic outward in door facing orientation
+        if (door != null)
+        {
+            Transform? t = door.exitScript?.entrancePoint ?? door.entrancePoint ?? door.transform;
+            Vector3 fwd = t.forward;
+            fwd.y = 0;
+            if (fwd != Vector3.zero)
+            {
+                __instance.transform.rotation = Quaternion.LookRotation(fwd.normalized);
+            }
+        }
+
+        if (__instance.IsOwner)
+        {
+            if (__instance.agent != null)
+            {
+                __instance.agent.enabled = false;
+            }
+            __instance.transform.position = safePos;
+            if (__instance.agent != null)
+            {
+                __instance.agent.enabled = true;
+                NavMeshUtil.SafeWarp(__instance.agent, safePos);
+                __instance.agent.ResetPath();
+            }
+        }
+        else
+        {
+            __instance.transform.position = safePos;
+            if (__instance.agent != null && __instance.agent.isOnNavMesh)
+            {
+                NavMeshUtil.SafeWarp(__instance.agent, safePos);
+            }
+        }
+
+        __instance.serverPosition = safePos;
+        __instance.SetEnemyOutside(setOutside);
+
+        // Play door audio matching vanilla
+        if (door != null && door.doorAudios != null && door.doorAudios.Length > 0 && door.entrancePointAudio != null)
+        {
+            door.entrancePointAudio.PlayOneShot(door.doorAudios[0]);
+            WalkieTalkie.TransmitOneShotAudio(door.entrancePointAudio, door.doorAudios[0]);
+        }
+
+        PhoneyPlugin.Logger.LogInfo(
+            $"[MaskedPatch] TeleportMaskedEnemy SAFE WARP on '{__instance.gameObject.name}' -> toOutside={setOutside} at {safePos} (onNavMesh={__instance.agent?.isOnNavMesh})");
+
+        return false; // Skip vanilla's flawed 5m GetNavMeshPosition!
     }
 
     [HarmonyPatch("CalculateAnimationDirection")]

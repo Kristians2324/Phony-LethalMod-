@@ -65,6 +65,7 @@ public class PhoneyDeceptiveAI : MonoBehaviour
     public  bool  IsPerformingFriendlyCrouch => _performingCrouch || _isPickingUpScrap;
     public  bool  IsUsingDoor => _isUsingDoor;
     public  Vector3 DoorInteractionTarget { get; private set; } = Vector3.zero;
+    private float _lastDoorTransitionTime = -99f;
     private float _ambientChatterTimer;
 
     // ── Paranoia & Hostility Escalation System ─────────────────────────────
@@ -1102,7 +1103,7 @@ public class PhoneyDeceptiveAI : MonoBehaviour
                     Masked.LookAtPosition(doorInteractPos, 0.6f);
                 }
 
-                if (arrived && !_isUsingDoor)
+                if (arrived && !_isUsingDoor && Time.time - _lastDoorTransitionTime > 4.5f)
                 {
                     StartCoroutine(DoorTransitionRoutine(door, toOutside: !Masked.isOutside, onComplete: () =>
                     {
@@ -1543,7 +1544,7 @@ public class PhoneyDeceptiveAI : MonoBehaviour
             }
 
             bool arrivedAtDoor = distToDoor <= 1.75f || (Masked.agent != null && Masked.agent.isOnNavMesh && !Masked.agent.pathPending && Masked.agent.remainingDistance <= 1.0f);
-            if (arrivedAtDoor && interiorDoor != null && !_isUsingDoor)
+            if (arrivedAtDoor && interiorDoor != null && !_isUsingDoor && Time.time - _lastDoorTransitionTime > 4.5f)
             {
                 StartCoroutine(DoorTransitionRoutine(interiorDoor, toOutside: true, onComplete: () =>
                 {
@@ -1559,14 +1560,13 @@ public class PhoneyDeceptiveAI : MonoBehaviour
 
                     if (roll < doorChance)
                     {
-                        // Option 1: Drop outside near the main entrance door (walk 4m out on catwalk/ground away from wall)
+                        // Option 1: Drop outside near the main entrance door on the catwalk landing
                         _deliveryPlan = ScrapDeliveryPlan.DropAtOutsideDoor;
                         var outDoor = MaskedScrapManager.FindDoor(wantEntranceToBuilding: true);
-                        Vector3 fwd = outDoor != null && outDoor.entrancePoint != null ? outDoor.entrancePoint.forward : transform.forward;
-                        _scrapDropTarget = transform.position + fwd * 4.0f;
-                        if (NavMesh.SamplePosition(_scrapDropTarget, out var dropHit, 3.0f, NavMesh.AllAreas))
+                        _scrapDropTarget = MaskedScrapManager.GetOutsideDoorDropPosition(outDoor);
+                        if (_scrapDropTarget == Vector3.zero)
                         {
-                            _scrapDropTarget = dropHit.position;
+                            _scrapDropTarget = transform.position + transform.forward * 1.2f;
                         }
                         PhoneyPlugin.Logger.LogInfo($"[DeceptiveAI] '{Masked.gameObject.name}' stepped outside! Delivery plan: DropAtOutsideDoor at {_scrapDropTarget} (isLateInDay={isLateInDay})");
                     }
@@ -1713,7 +1713,7 @@ public class PhoneyDeceptiveAI : MonoBehaviour
         }
 
         bool arrivedAtDoor = dist <= 1.75f || (Masked.agent != null && Masked.agent.isOnNavMesh && !Masked.agent.pathPending && Masked.agent.remainingDistance <= 1.0f);
-        if (arrivedAtDoor && outsideDoor != null && !_isUsingDoor)
+        if (arrivedAtDoor && outsideDoor != null && !_isUsingDoor && Time.time - _lastDoorTransitionTime > 4.5f)
         {
             StartCoroutine(DoorTransitionRoutine(outsideDoor, toOutside: false, onComplete: () =>
             {
@@ -1822,20 +1822,11 @@ public class PhoneyDeceptiveAI : MonoBehaviour
         if (door.exitScript == null) door.FindExitPoint();
 
         var exitDoor = door.exitScript ?? MaskedScrapManager.FindDoor(toOutside);
+        Vector3 safeExitPos = MaskedScrapManager.GetSafeDoorExitPosition(door, toOutside);
+
         Transform targetPoint = exitDoor != null && exitDoor.entrancePoint != null
             ? exitDoor.entrancePoint
             : (exitDoor != null ? exitDoor.transform : door.transform);
-
-        // Safe landing position on destination NavMesh
-        Vector3 exitPos = targetPoint.position;
-        if (NavMesh.SamplePosition(exitPos, out var navHit, 3.5f, NavMesh.AllAreas))
-        {
-            exitPos = navHit.position;
-        }
-        else if (RoundManager.Instance != null)
-        {
-            exitPos = RoundManager.Instance.GetNavMeshPosition(exitPos);
-        }
 
         // Face mimic in the landing orientation away from door threshold
         Vector3 forwardDir = targetPoint.forward;
@@ -1850,20 +1841,20 @@ public class PhoneyDeceptiveAI : MonoBehaviour
         {
             Masked.agent.enabled = false;
         }
-        transform.position = exitPos;
-        Masked.serverPosition = exitPos;
+        transform.position = safeExitPos;
+        Masked.serverPosition = safeExitPos;
 
         // Synchronize teleportation across network
         try
         {
             if (Masked.IsOwner)
             {
-                Masked.TeleportMaskedEnemyAndSync(exitPos, setOutside: toOutside);
+                Masked.TeleportMaskedEnemyAndSync(safeExitPos, setOutside: toOutside);
             }
             else
             {
-                Masked.TeleportMaskedEnemy(exitPos, setOutside: toOutside);
-                Masked.TeleportMaskedEnemyServerRpc(exitPos, setOutside: toOutside);
+                Masked.TeleportMaskedEnemy(safeExitPos, setOutside: toOutside);
+                Masked.TeleportMaskedEnemyServerRpc(safeExitPos, setOutside: toOutside);
             }
         }
         catch (Exception ex)
@@ -1875,7 +1866,7 @@ public class PhoneyDeceptiveAI : MonoBehaviour
         if (Masked.agent != null)
         {
             Masked.agent.enabled = true;
-            NavMeshUtil.SafeWarp(Masked.agent, exitPos);
+            NavMeshUtil.SafeWarp(Masked.agent, safeExitPos);
             Masked.agent.ResetPath();
         }
 
@@ -1894,7 +1885,7 @@ public class PhoneyDeceptiveAI : MonoBehaviour
             }
         }
 
-        PhoneyPlugin.Logger.LogInfo($"[Door] '{Masked.gameObject.name}' stepped through door → toOutside={toOutside} at {exitPos} (facing: {forwardDir}, isOnNavMesh={Masked.agent?.isOnNavMesh})");
+        PhoneyPlugin.Logger.LogInfo($"[Door] '{Masked.gameObject.name}' stepped through door → toOutside={toOutside} at {safeExitPos} (facing: {forwardDir}, isOnNavMesh={Masked.agent?.isOnNavMesh})");
     }
 
     private IEnumerator DoorTransitionRoutine(EntranceTeleport door, bool toOutside, Action onComplete)
@@ -1924,6 +1915,7 @@ public class PhoneyDeceptiveAI : MonoBehaviour
             {
                 if (Masked == null || Masked.isEnemyDead)
                 {
+                    _lastDoorTransitionTime = Time.time;
                     _isUsingDoor = false;
                     DoorInteractionTarget = Vector3.zero;
                     PhoneyNetworkManager.Instance.SyncDoorInteraction(Masked, Vector3.zero, false);
@@ -1955,6 +1947,7 @@ public class PhoneyDeceptiveAI : MonoBehaviour
         {
             if (Masked == null || Masked.isEnemyDead)
             {
+                _lastDoorTransitionTime = Time.time;
                 _isUsingDoor = false;
                 DoorInteractionTarget = Vector3.zero;
                 PhoneyNetworkManager.Instance.SyncDoorInteraction(Masked, Vector3.zero, false);
@@ -1993,6 +1986,7 @@ public class PhoneyDeceptiveAI : MonoBehaviour
             if (Masked == null || Masked.isEnemyDead)
             {
                 try { door.FinishOpeningEntrance(); } catch { }
+                _lastDoorTransitionTime = Time.time;
                 _isUsingDoor = false;
                 DoorInteractionTarget = Vector3.zero;
                 PhoneyNetworkManager.Instance.SyncDoorInteraction(Masked, Vector3.zero, false);
@@ -2034,6 +2028,7 @@ public class PhoneyDeceptiveAI : MonoBehaviour
         {
             NavMeshUtil.SafeSetStopped(Masked.agent, false);
         }
+        _lastDoorTransitionTime = Time.time;
         _isUsingDoor = false;
         DoorInteractionTarget = Vector3.zero;
         PhoneyNetworkManager.Instance.SyncDoorInteraction(Masked, Vector3.zero, false);
@@ -2689,7 +2684,7 @@ public class PhoneyDeceptiveAI : MonoBehaviour
                 float distToDoor = Vector3.Distance(transform.position, doorNavPos);
                 bool arrived = distToDoor <= 1.85f || (Masked.agent != null && Masked.agent.isOnNavMesh && !Masked.agent.pathPending && Masked.agent.remainingDistance <= 1.2f);
 
-                if (arrived)
+                if (arrived && Time.time - _lastDoorTransitionTime > 2.5f)
                 {
                     // At the door — burst through it to chase the player!
                     PhoneyPlugin.Logger.LogInfo(
@@ -2960,7 +2955,7 @@ public class PhoneyDeceptiveAI : MonoBehaviour
             {
                 Vector3 doorNavPos = MaskedScrapManager.GetDoorNavPosition(outDoor);
                 Masked.SetDestinationToPosition(doorNavPos);
-                if (Vector3.Distance(transform.position, doorNavPos) <= 2.5f && !_isUsingDoor)
+                if (Vector3.Distance(transform.position, doorNavPos) <= 2.5f && !_isUsingDoor && Time.time - _lastDoorTransitionTime > 4.5f)
                 {
                     PhoneyPlugin.Logger.LogInfo($"[DeceptiveAI] '{Masked.gameObject.name}': Reached entrance door during retreat — entering facility and returning to normal.");
                     StartCoroutine(DoorTransitionRoutine(outDoor, toOutside: false, onComplete: () =>
@@ -3614,11 +3609,10 @@ public class PhoneyDeceptiveAI : MonoBehaviour
                 {
                     _deliveryPlan = ScrapDeliveryPlan.DropAtOutsideDoor;
                     var outDoor = MaskedScrapManager.FindDoor(wantEntranceToBuilding: true);
-                    Vector3 fwd = outDoor != null && outDoor.entrancePoint != null ? outDoor.entrancePoint.forward : transform.forward;
-                    _scrapDropTarget = transform.position + fwd * 4.0f;
-                    if (NavMesh.SamplePosition(_scrapDropTarget, out var dropHit, 3.0f, NavMesh.AllAreas))
+                    _scrapDropTarget = MaskedScrapManager.GetOutsideDoorDropPosition(outDoor);
+                    if (_scrapDropTarget == Vector3.zero)
                     {
-                        _scrapDropTarget = dropHit.position;
+                        _scrapDropTarget = transform.position + transform.forward * 1.2f;
                     }
                 }
                 else
