@@ -52,7 +52,12 @@ public class MaskedScrapManager : MonoBehaviour
             name.IndexOf("sheet", StringComparison.OrdinalIgnoreCase) >= 0 ||
             name.IndexOf("engine", StringComparison.OrdinalIgnoreCase) >= 0 ||
             name.IndexOf("axle", StringComparison.OrdinalIgnoreCase) >= 0 ||
-            name.IndexOf("cash", StringComparison.OrdinalIgnoreCase) >= 0)
+            name.IndexOf("cash", StringComparison.OrdinalIgnoreCase) >= 0 ||
+            name.IndexOf("apparatus", StringComparison.OrdinalIgnoreCase) >= 0 ||
+            name.IndexOf("lung", StringComparison.OrdinalIgnoreCase) >= 0 ||
+            name.IndexOf("lamp", StringComparison.OrdinalIgnoreCase) >= 0 ||
+            name.IndexOf("painting", StringComparison.OrdinalIgnoreCase) >= 0 ||
+            name.IndexOf("robot", StringComparison.OrdinalIgnoreCase) >= 0)
         {
             return true;
         }
@@ -200,6 +205,94 @@ public class MaskedScrapManager : MonoBehaviour
     }
 
     /// <summary>
+    /// Multi-layer player body and ragdoll detection:
+    /// Strictly prevents mimics from ever targeting, picking up, or corrupting dead player bodies.
+    /// Checks runtime type (RagdollGrabbableObject), DeadBodyInfo components, type name, item name,
+    /// gameObject name, and scan node header text ("Body of [Player]").
+    /// </summary>
+    public static bool IsPlayerBodyOrRagdoll(GrabbableObject? item)
+    {
+        if (item == null) return false;
+
+        // Layer 1: Vanilla RagdollGrabbableObject or any subclass
+        if (item is RagdollGrabbableObject) return true;
+
+        // Layer 2: DeadBodyInfo attached to GameObject, parent, or children
+        if (item.GetComponent<DeadBodyInfo>() != null ||
+            item.GetComponentInParent<DeadBodyInfo>() != null ||
+            item.GetComponentInChildren<DeadBodyInfo>() != null)
+            return true;
+
+        // Layer 3: Type name contains "ragdoll" or "body"
+        string typeName = item.GetType().Name;
+        if (typeName.IndexOf("ragdoll", StringComparison.OrdinalIgnoreCase) >= 0 ||
+            typeName.IndexOf("body", StringComparison.OrdinalIgnoreCase) >= 0)
+            return true;
+
+        // Layer 4: GameObject name contains "ragdoll" or "body"
+        if (item.gameObject.name.IndexOf("ragdoll", StringComparison.OrdinalIgnoreCase) >= 0 ||
+            item.gameObject.name.IndexOf("body", StringComparison.OrdinalIgnoreCase) >= 0)
+            return true;
+
+        // Layer 5: Item properties name contains "ragdoll" or "body"
+        if (item.itemProperties != null && !string.IsNullOrEmpty(item.itemProperties.itemName))
+        {
+            if (item.itemProperties.itemName.IndexOf("body", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                item.itemProperties.itemName.IndexOf("ragdoll", StringComparison.OrdinalIgnoreCase) >= 0)
+                return true;
+        }
+
+        // Layer 6: ScanNodeProperties header contains "Body of" or "Body"
+        var scanNodes = item.GetComponentsInChildren<ScanNodeProperties>(true);
+        if (scanNodes != null && scanNodes.Length > 0)
+        {
+            for (int i = 0; i < scanNodes.Length; i++)
+            {
+                var sn = scanNodes[i];
+                if (sn != null && !string.IsNullOrEmpty(sn.headerText))
+                {
+                    if (sn.headerText.IndexOf("Body of", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        sn.headerText.IndexOf("Body", StringComparison.OrdinalIgnoreCase) >= 0)
+                        return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Computes a randomized small-to-medium negative value reduction for scrap touched by a mimic.
+    /// Strictly guarantees:
+    ///   - Reduction is always negative (value strictly decreases).
+    ///   - Scaled by percentage (8% to 18% of item's value), bounded between MinReduction and MaxReduction.
+    ///   - Preserves at least $1 in scrap value so item never becomes zero or negative.
+    /// </summary>
+    public static int CalculateTaintReduction(int currentScrapValue)
+    {
+        if (currentScrapValue <= 1) return 0;
+
+        int minRed = PhoneyPlugin.MimicTouchMinReduction != null
+            ? Mathf.Max(1, PhoneyPlugin.MimicTouchMinReduction.Value)
+            : 3;
+        int maxRed = PhoneyPlugin.MimicTouchMaxReduction != null
+            ? Mathf.Max(minRed, PhoneyPlugin.MimicTouchMaxReduction.Value)
+            : 14;
+
+        // Small-to-medium random loss: 8% to 18% of current scrap value
+        int percentLoss = Mathf.RoundToInt(currentScrapValue * UnityEngine.Random.Range(0.08f, 0.18f));
+        int reduction = Mathf.Clamp(percentLoss, minRed, maxRed);
+
+        // Clamping to guarantee at least $1 remaining value
+        if (currentScrapValue - reduction < 1)
+        {
+            reduction = Mathf.Max(1, currentScrapValue - 1);
+        }
+
+        return reduction;
+    }
+
+    /// <summary>
     /// Global registry of scrap network object IDs that have already been gathered or dropped by any mimic.
     /// Once an item is dropped in the collection pile, it is permanently recorded so NO mimic ever picks it up again.
     /// </summary>
@@ -280,6 +373,146 @@ public class MaskedScrapManager : MonoBehaviour
     public static bool IsNearEntranceOrShip(Vector3 position)
     {
         return IsNearEntranceDoor(position) || IsNearShip(position);
+    }
+
+    /// <summary>
+    /// Gets the entrance doorway / catwalk ramp position of the ship, suitable for navigating into the ship from the outside.
+    /// </summary>
+    public static Vector3 GetShipEntrancePosition()
+    {
+        try
+        {
+            if (StartOfRound.Instance != null)
+            {
+                if (StartOfRound.Instance.outsideDoorPosition != null)
+                    return StartOfRound.Instance.outsideDoorPosition.position;
+                if (StartOfRound.Instance.shipDoorNode != null)
+                    return StartOfRound.Instance.shipDoorNode.position;
+                if (StartOfRound.Instance.shipDoorAudioSource != null)
+                    return StartOfRound.Instance.shipDoorAudioSource.transform.position;
+            }
+        }
+        catch { }
+        return Vector3.zero;
+    }
+
+    /// <summary>
+    /// Gets the interior central floor position inside the ship cabin.
+    /// </summary>
+    public static Vector3 GetShipInteriorPosition()
+    {
+        try
+        {
+            if (StartOfRound.Instance != null)
+            {
+                if (StartOfRound.Instance.middleOfShipNode != null)
+                    return StartOfRound.Instance.middleOfShipNode.position;
+                if (StartOfRound.Instance.insideShipPositions != null && StartOfRound.Instance.insideShipPositions.Length > 0 && StartOfRound.Instance.insideShipPositions[0] != null)
+                    return StartOfRound.Instance.insideShipPositions[0].position;
+            }
+        }
+        catch { }
+        return Vector3.zero;
+    }
+
+    /// <summary>
+    /// Checks if a player is currently inside the ship cabin or on the ship elevator/catwalk.
+    /// </summary>
+    public static bool IsPlayerInShip(PlayerControllerB? player)
+    {
+        if (player == null || player.isPlayerDead) return false;
+        try
+        {
+            if (player.isInHangarShipRoom || player.isInElevator) return true;
+            if (StartOfRound.Instance != null)
+            {
+                Vector3 pos = player.transform.position;
+                if (StartOfRound.Instance.shipInnerRoomBounds != null &&
+                    StartOfRound.Instance.shipInnerRoomBounds.bounds.Contains(pos))
+                    return true;
+                if (StartOfRound.Instance.shipBounds != null &&
+                    StartOfRound.Instance.shipBounds.bounds.Contains(pos))
+                    return true;
+                if (StartOfRound.Instance.middleOfShipNode != null)
+                {
+                    Vector3 mid = StartOfRound.Instance.middleOfShipNode.position;
+                    float horizontalDist = Vector2.Distance(new Vector2(pos.x, pos.z), new Vector2(mid.x, mid.z));
+                    float verticalDist = Mathf.Abs(pos.y - mid.y);
+                    if (horizontalDist <= 6.5f && verticalDist <= 2.2f)
+                        return true;
+                }
+            }
+        }
+        catch { }
+        return false;
+    }
+
+    /// <summary>
+    /// Checks if an enemy is currently inside the ship cabin.
+    /// Distinguishes being inside the cabin from standing underneath the ship on the ground.
+    /// </summary>
+    public static bool IsEnemyInShip(EnemyAI? enemy)
+    {
+        if (enemy == null || enemy.isEnemyDead) return false;
+        try
+        {
+            if (enemy.isInsidePlayerShip) return true;
+            if (StartOfRound.Instance != null)
+            {
+                Vector3 pos = enemy.transform.position;
+                if (StartOfRound.Instance.shipInnerRoomBounds != null &&
+                    StartOfRound.Instance.shipInnerRoomBounds.bounds.Contains(pos))
+                    return true;
+                if (StartOfRound.Instance.shipStrictInnerRoomBounds != null &&
+                    StartOfRound.Instance.shipStrictInnerRoomBounds.bounds.Contains(pos))
+                    return true;
+                if (StartOfRound.Instance.middleOfShipNode != null)
+                {
+                    Vector3 mid = StartOfRound.Instance.middleOfShipNode.position;
+                    float horizontalDist = Vector2.Distance(new Vector2(pos.x, pos.z), new Vector2(mid.x, mid.z));
+                    float verticalDiff = pos.y - mid.y; // Positive if above floor, negative if below floor
+                    if (horizontalDist <= 4.8f && verticalDiff >= -0.6f && verticalDiff <= 2.2f)
+                        return true;
+                }
+            }
+        }
+        catch { }
+        return false;
+    }
+
+    /// <summary>
+    /// Checks if an enemy is on the catwalk ramp or doorway threshold leading into the ship.
+    /// </summary>
+    public static bool IsEnemyAtShipEntrance(EnemyAI? enemy)
+    {
+        if (enemy == null || enemy.isEnemyDead) return false;
+        try
+        {
+            Vector3 entrance = GetShipEntrancePosition();
+            if (entrance == Vector3.zero) return false;
+            Vector3 pos = enemy.transform.position;
+            float dist = Vector3.Distance(pos, entrance);
+            return dist <= 2.5f && Mathf.Abs(pos.y - entrance.y) <= 1.4f;
+        }
+        catch { }
+        return false;
+    }
+
+    /// <summary>
+    /// Checks if a position is on the ground terrain directly underneath the elevated ship belly.
+    /// </summary>
+    public static bool IsPositionUnderShip(Vector3 pos)
+    {
+        try
+        {
+            if (StartOfRound.Instance?.middleOfShipNode == null) return false;
+            Vector3 mid = StartOfRound.Instance.middleOfShipNode.position;
+            float horizontalDist = Vector2.Distance(new Vector2(pos.x, pos.z), new Vector2(mid.x, mid.z));
+            float verticalDiff = mid.y - pos.y; // Positive when position is BELOW middleOfShipNode floor
+            return horizontalDist <= 6.8f && verticalDiff >= 0.85f;
+        }
+        catch { }
+        return false;
     }
 
     /// <summary>
@@ -381,11 +614,21 @@ public class MaskedScrapManager : MonoBehaviour
     {
         try
         {
-            if (door == null) door = FindDoor(toOutside);
+            if (door == null) door = FindDoor(wantEntranceToBuilding: toOutside);
             if (door == null) return Vector3.zero;
 
-            if (door.exitScript == null) door.FindExitPoint();
-            EntranceTeleport exitDoor = door.exitScript ?? FindDoor(toOutside) ?? door;
+            EntranceTeleport exitDoor;
+            if (door.isEntranceToBuilding == toOutside)
+            {
+                // door is ALREADY the destination door on the target side!
+                exitDoor = door;
+            }
+            else
+            {
+                // door is the source entrance door; use its exitScript to reach the target side
+                if (door.exitScript == null) door.FindExitPoint();
+                exitDoor = door.exitScript ?? FindDoor(wantEntranceToBuilding: toOutside) ?? door;
+            }
 
             Transform targetTransform = exitDoor.entrancePoint != null ? exitDoor.entrancePoint : exitDoor.transform;
             Vector3 rawPos = targetTransform.position;
@@ -396,6 +639,24 @@ public class MaskedScrapManager : MonoBehaviour
             if (forward != Vector3.zero) forward.Normalize();
             else forward = Vector3.forward;
 
+            if (!toOutside)
+            {
+                // INSIDE THE FACILITY:
+                // Inside door landings are flat interior floors. Stepping slightly forward from entrancePoint (0.8m)
+                // places the agent clear of door collision while firmly on the interior NavMesh.
+                Vector3 insideCandidate = rawPos + forward * 0.8f;
+                if (NavMesh.SamplePosition(insideCandidate, out var insideHit, 1.5f, NavMesh.AllAreas))
+                {
+                    return insideHit.position;
+                }
+                if (NavMesh.SamplePosition(rawPos, out var rawHit, 2.0f, NavMesh.AllAreas))
+                {
+                    return rawHit.position;
+                }
+                return rawPos;
+            }
+
+            // OUTSIDE ON MOON SURFACE / CATWALK:
             int mask = StartOfRound.Instance != null 
                 ? StartOfRound.Instance.collidersAndRoomMaskAndDefault 
                 : ~0;
@@ -530,9 +791,10 @@ public class MaskedScrapManager : MonoBehaviour
             if (item.NetworkObject != null && GloballyProcessedScrapIds.Contains(item.NetworkObject.NetworkObjectId)) continue;
             if (_ignoredItems.Contains(item)) continue;
             if (item.itemProperties == null) continue;
-            // Only target actual scrap quota items — never touch keys!
+            // Only target actual scrap quota items — never touch keys or player bodies!
             if (!item.itemProperties.isScrap) continue;
             if (IsKeyItem(item)) continue;
+            if (IsPlayerBodyOrRagdoll(item)) continue;
 
             // Two-handed inventory rules (matching real player behavior):
             // - If already carrying ANY item, skip two-handed items (can't carry both)
@@ -642,6 +904,14 @@ public class MaskedScrapManager : MonoBehaviour
         if (scrap.isHeld || scrap.isPocketed) return false;
         if (!CanPickUpMoreScrap()) return false;
 
+        // NEVER pick up dead player bodies or ragdolls!
+        if (IsPlayerBodyOrRagdoll(scrap))
+        {
+            PhoneyPlugin.Logger.LogInfo(
+                $"[ScrapManager] '{_masked.gameObject.name}' refused to touch dead player body '{scrap.gameObject.name}'. Bodies are not scrap!");
+            return false;
+        }
+
         // NEVER pick up keys — they are reserved for player facility access!
         if (IsKeyItem(scrap))
         {
@@ -664,26 +934,25 @@ public class MaskedScrapManager : MonoBehaviour
 
         ExecuteGrabLocally(scrap);
 
-        // Apply flat value reduction (-20) and corrupt item name when touched by a mimic
+        // Apply randomized small-to-medium negative value reduction when touched by a mimic
         if (PhoneyPlugin.EnableMimicTouchReduction.Value && scrap.NetworkObject != null)
         {
             ulong scrapNetId = scrap.NetworkObject.NetworkObjectId;
             if (!TaintedScrapIds.Contains(scrapNetId))
             {
                 TaintedScrapIds.Add(scrapNetId);
-                int reduction = Mathf.Max(1, PhoneyPlugin.MimicTouchValueReduction.Value);
                 int oldValue = scrap.scrapValue;
                 bool isScrap = scrap.itemProperties != null && scrap.itemProperties.isScrap;
-                int newValue = isScrap && scrap.scrapValue > 1 ? Mathf.Max(1, scrap.scrapValue - reduction) : scrap.scrapValue;
+                int reduction = isScrap ? CalculateTaintReduction(oldValue) : 0;
+                int newValue = isScrap ? Mathf.Max(1, oldValue - reduction) : oldValue;
                 string originalName = scrap.itemProperties?.itemName ?? "Item";
-                string distortedName = GenerateDistortedName(originalName);
 
-                ApplyTaintLocally(scrap, newValue, distortedName);
+                ApplyTaintLocally(scrap, newValue, originalName);
 
-                PhoneyNetworkManager.Instance.BroadcastItemTaint(scrapNetId, newValue, distortedName);
+                PhoneyNetworkManager.Instance.BroadcastItemTaint(scrapNetId, newValue, originalName);
 
                 PhoneyPlugin.Logger.LogInfo(
-                    $"[ScrapManager] Mimic touch corrupted item '{originalName}' -> '{distortedName}', value: ${oldValue} -> ${newValue} (loss: -${(isScrap && scrap.scrapValue > 1 ? reduction : 0)})");
+                    $"[ScrapManager] Mimic touch reduced item '{originalName}' value: ${oldValue} -> ${newValue} (loss: -${reduction})");
             }
         }
 
@@ -870,7 +1139,7 @@ public class MaskedScrapManager : MonoBehaviour
 
     public void ExecuteGrabLocally(GrabbableObject scrap)
     {
-        if (scrap == null) return;
+        if (scrap == null || IsPlayerBodyOrRagdoll(scrap) || IsKeyItem(scrap)) return;
         if (IsItemTwoHanded(scrap))
         {
             // Two-handed item: pocket any existing carried items so meshes are concealed and items aren't leaked!
@@ -1154,14 +1423,16 @@ public class MaskedScrapManager : MonoBehaviour
     /// <summary>
     /// Applies scrap value reduction, HUD hover tooltip, and scan node updates locally.
     /// Safe for both server and receiving clients without breaking ScriptableObject asset references.
+    /// Ensures scan node header, subText ("Value: $XX"), scrapValue, and nodeType (2 = Scrap)
+    /// remain 100% visible and readable to players scanning the item.
     /// </summary>
-    public static void ApplyTaintLocally(GrabbableObject scrap, int newValue, string distortedName)
+    public static void ApplyTaintLocally(GrabbableObject scrap, int newValue, string displayName)
     {
         if (scrap == null) return;
 
-        if (string.IsNullOrEmpty(distortedName))
+        if (string.IsNullOrEmpty(displayName))
         {
-            distortedName = GenerateDistortedName(scrap.itemProperties?.itemName ?? "Item");
+            displayName = scrap.itemProperties?.itemName ?? "Item";
         }
 
         bool isScrap = scrap.itemProperties != null && scrap.itemProperties.isScrap;
@@ -1177,16 +1448,17 @@ public class MaskedScrapManager : MonoBehaviour
             {
                 if (scanNode != null)
                 {
-                    scanNode.headerText = distortedName;
+                    scanNode.headerText = displayName;
                     if (isScrap)
                     {
                         scanNode.scrapValue = newValue;
                         scanNode.subText = $"Value: ${newValue}";
+                        scanNode.nodeType = 2; // Always enforce scrap node type so scanner displays green box & value!
                     }
                 }
             }
         }
 
-        scrap.customGrabTooltip = $"Grab {distortedName} : [E]";
+        scrap.customGrabTooltip = $"Grab {displayName} : [E]";
     }
 }

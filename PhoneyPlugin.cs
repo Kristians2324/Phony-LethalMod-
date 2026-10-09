@@ -59,6 +59,8 @@ public class PhoneyPlugin : BaseUnityPlugin
     public static ConfigEntry<bool>  EnableScrapLooting          { get; private set; } = null!;
     public static ConfigEntry<bool>  EnableMimicTouchReduction   { get; private set; } = null!;
     public static ConfigEntry<int>   MimicTouchValueReduction    { get; private set; } = null!;
+    public static ConfigEntry<int>   MimicTouchMinReduction       { get; private set; } = null!;
+    public static ConfigEntry<int>   MimicTouchMaxReduction       { get; private set; } = null!;
     public static ConfigEntry<bool>  EnableVoiceAccusationAggression { get; private set; } = null!;
     public static ConfigEntry<bool>  EnableDemonicAttackVoice       { get; private set; } = null!;
     public static ConfigEntry<float> DemonicVoicePitch              { get; private set; } = null!;
@@ -69,6 +71,8 @@ public class PhoneyPlugin : BaseUnityPlugin
     public static ConfigEntry<int>   MaxCarriedScrapCount           { get; private set; } = null!;
     public static ConfigEntry<float> HaulToShipChance               { get; private set; } = null!;
     public static ConfigEntry<float> HaulLootOutsideChance           { get; private set; } = null!;
+    public static ConfigEntry<bool>  EnableLateNightAggression      { get; private set; } = null!;
+    public static ConfigEntry<float> LateNightAggressionHour        { get; private set; } = null!;
 
     // ── Spawning ──────────────────────────────────────────────────────────────
     public static ConfigEntry<bool>  EnableCrossMoonSpawning { get; private set; } = null!;
@@ -110,6 +114,8 @@ public class PhoneyPlugin : BaseUnityPlugin
             Logger.LogInfo($"[STARTUP]   MoonSpawnRarity      = {MoonSpawnRarity.Value}");
             Logger.LogInfo($"[STARTUP]   TestModeEnabled      = {TestModeEnabled.Value}");
             Logger.LogInfo($"[STARTUP]   AllowTacticalRetreat = {AllowTacticalRetreat.Value}");
+            Logger.LogInfo($"[STARTUP]   EnableLateNightAggro = {EnableLateNightAggression.Value} (Hour={LateNightAggressionHour.Value:F1})");
+            Logger.LogInfo($"[STARTUP]   AmbushSpeeds         = Jog:{AmbushJogSpeed.Value:F1} m/s, Sprint:{AmbushSprintSpeed.Value:F1} m/s");
             Logger.LogInfo($"[STARTUP]   EnableDemonicVoice   = {EnableDemonicAttackVoice.Value} (Pitch={DemonicVoicePitch.Value:F2}, Distort={DemonicDistortionLevel.Value:F2})");
         }
         catch (Exception ex)
@@ -274,8 +280,8 @@ public class PhoneyPlugin : BaseUnityPlugin
             "Interval in seconds (default: 120s / 2 minutes) for each paranoia hostility check.");
 
         InitialHostilityChance = Config.Bind(
-            "DeceptiveAI", "InitialHostilityChance", 0.40f,
-            "Base percentage chance (0.0 - 1.0) on the first 2-minute mark for the mimic to become hostile (default: 0.40 = 40%).");
+            "DeceptiveAI", "InitialHostilityChance", 0.45f,
+            "Base percentage chance (0.0 - 1.0) on the first 2-minute mark for the mimic to become hostile (default: 0.45 = 45%).");
 
         HostilityChanceIncrement = Config.Bind(
             "DeceptiveAI", "HostilityChanceIncrement", 0.25f,
@@ -291,7 +297,15 @@ public class PhoneyPlugin : BaseUnityPlugin
 
         MimicTouchValueReduction = Config.Bind(
             "DeceptiveAI", "MimicTouchValueReduction", 20,
-            "Flat reduction in scrap value applied when a mimic touches scrap (default: 20 value loss).");
+            "Legacy flat reduction in scrap value applied when a mimic touches scrap (default: 20 value loss).");
+
+        MimicTouchMinReduction = Config.Bind(
+            "DeceptiveAI", "MimicTouchMinReduction", 3,
+            "Minimum random scrap value reduction applied when a mimic touches scrap (default: 3).");
+
+        MimicTouchMaxReduction = Config.Bind(
+            "DeceptiveAI", "MimicTouchMaxReduction", 14,
+            "Maximum random scrap value reduction applied when a mimic touches scrap (default: 14).");
 
         EnableVoiceAccusationAggression = Config.Bind(
             "DeceptiveAI", "EnableVoiceAccusationAggression", true,
@@ -316,12 +330,20 @@ public class PhoneyPlugin : BaseUnityPlugin
             "Average cooldown in seconds between pursuit demonic vocalizations during an ambush chase (default: 22.0s).");
 
         AmbushSprintSpeed = Config.Bind(
-            "DeceptiveAI", "AmbushSprintSpeed", 6.8f,
-            "Sprint speed of the mimic during ambush pursuit (player sprint: ~10.3 m/s, default: 6.8f). Allows sprinting players to outrun the mimic, but outpaces walking players.");
+            "DeceptiveAI", "AmbushSprintSpeed", 8.0f,
+            "Sprint speed of the mimic during ambush pursuit (player sprint: ~10.3 m/s, default: 8.0f). Allows sprinting players to outrun the mimic, but outpaces walking players.");
 
         AmbushJogSpeed = Config.Bind(
-            "DeceptiveAI", "AmbushJogSpeed", 3.8f,
-            "Reaction-window jog speed during ambush (player walk: ~4.6 m/s, default: 3.8f). Gives players a window to gain distance and recover stamina.");
+            "DeceptiveAI", "AmbushJogSpeed", 5.2f,
+            "Recovery jog speed during ambush (player walk: ~4.6 m/s, default: 5.2f). Outpaces walking players so sprinting/evasion is necessary.");
+
+        EnableLateNightAggression = Config.Bind(
+            "DeceptiveAI", "EnableLateNightAggression", true,
+            "Force mimics to permanently enter aggressive attack mode during late night on the moon (default: true).");
+
+        LateNightAggressionHour = Config.Bind(
+            "DeceptiveAI", "LateNightAggressionHour", 22.0f,
+            "The hour on the 24h clock when late-night perma-aggression triggers (22.0 = 10:00 PM, default: 22.0).");
 
         MaxCarriedScrapCount = Config.Bind(
             "DeceptiveAI", "MaxCarriedScrapCount", 4,

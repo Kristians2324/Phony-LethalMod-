@@ -110,8 +110,9 @@ public class PhoneyDeceptiveAI : MonoBehaviour
 
     private const float WalkSpeed              = 4.6f;
     private const float UndercoverSprintSpeed  = 9.8f;
-    public float AmbushJogSpeed    => PhoneyPlugin.AmbushJogSpeed != null ? PhoneyPlugin.AmbushJogSpeed.Value : 3.8f;
-    public float AmbushSprintSpeed => PhoneyPlugin.AmbushSprintSpeed != null ? PhoneyPlugin.AmbushSprintSpeed.Value : 6.8f;
+    public float AmbushJogSpeed    => PhoneyPlugin.AmbushJogSpeed != null ? PhoneyPlugin.AmbushJogSpeed.Value : 5.2f;
+    public float AmbushSprintSpeed => PhoneyPlugin.AmbushSprintSpeed != null ? PhoneyPlugin.AmbushSprintSpeed.Value : 8.0f;
+    private bool _isLateNightPermaAggressive = false;
 
     private float _stamina       = 1.0f;
     private bool  _isSprinting   = false;
@@ -137,6 +138,7 @@ public class PhoneyDeceptiveAI : MonoBehaviour
     private float _lastLOSLogTime;
     private float _nextHeadGlanceTime;
     private float _nextHotbarCycleTime;
+    private float _underShipStuckTimer = 0f;
 
     // ─── Mineshaft Elevator Integration ───────────────────────────────────────
 
@@ -171,6 +173,30 @@ public class PhoneyDeceptiveAI : MonoBehaviour
     public static bool IsLateInExpeditionDay()
     {
         return TimeOfDay.Instance != null && TimeOfDay.Instance.normalizedTimeOfDay >= 0.55f;
+    }
+
+    /// <summary>
+    /// Checks whether the moon clock has reached or passed late night (default 10:00 PM / 22:00).
+    /// During late night, the mimic permanently abandons its disguise, reveals its blood-soaked demon form,
+    /// and hunts crewmates aggressively without ever de-aggroing or returning to friendly mode.
+    /// </summary>
+    public static bool IsLateNightPermaAggressiveTime()
+    {
+        if (PhoneyPlugin.EnableLateNightAggression != null && !PhoneyPlugin.EnableLateNightAggression.Value)
+            return false;
+
+        if (TimeOfDay.Instance == null)
+            return false;
+
+        float targetHour = PhoneyPlugin.LateNightAggressionHour != null ? PhoneyPlugin.LateNightAggressionHour.Value : 22.0f;
+
+        // Calculate 24-hour clock hour matching HUDManager.SetClock
+        int numberOfHours = TimeOfDay.Instance.numberOfHours > 0 ? TimeOfDay.Instance.numberOfHours : 18;
+        float normalized = TimeOfDay.Instance.normalizedTimeOfDay;
+        int totalMinutes = (int)(normalized * 60f * numberOfHours) + 360;
+        float currentHour = totalMinutes / 60f;
+
+        return currentHour >= targetHour || normalized >= 0.88f;
     }
 
     /// <summary>
@@ -227,7 +253,7 @@ public class PhoneyDeceptiveAI : MonoBehaviour
             maskedEnemy.agent.angularSpeed = 600f;
         }
 
-        _hostilityChance = Mathf.Clamp01(Mathf.Max(0.40f, PhoneyPlugin.InitialHostilityChance.Value));
+        _hostilityChance = Mathf.Clamp01(Mathf.Max(0.45f, PhoneyPlugin.InitialHostilityChance.Value));
         _nextParanoiaCheckTime = Time.time + PhoneyPlugin.ParanoiaIntervalSeconds.Value;
         _isHostilePrimed = false;
         _ambientChatterTimer = Time.time + UnityEngine.Random.Range(30f, 45f);
@@ -255,6 +281,9 @@ public class PhoneyDeceptiveAI : MonoBehaviour
                 $"[DeceptiveAI] '{maskedEnemy.gameObject.name}' locked onto player '{bestPlayer.playerUsername}' (dist: {initDist:F1}m) from spawn! Sprinting to stalk target.");
         }
 
+        maskedEnemy.StopSearch(maskedEnemy.searchForPlayers);
+        maskedEnemy.StopSearch(maskedEnemy.currentSearch);
+
         PhoneyPlugin.Logger.LogInfo(
             $"[DeceptiveAI] '{maskedEnemy.gameObject.name}' initialized. Paranoia timer: {PhoneyPlugin.ParanoiaIntervalSeconds.Value:F0}s (initial chance: {_hostilityChance:P0}). WalkSpeed: {WalkSpeed:F1}, SprintSpeed: {UndercoverSprintSpeed:F1}.");
     }
@@ -263,6 +292,13 @@ public class PhoneyDeceptiveAI : MonoBehaviour
 
     public void TransitionTo(MimicPhase next)
     {
+        if (next != MimicPhase.AmbushStrike && IsLateNightPermaAggressiveTime())
+        {
+            PhoneyPlugin.Logger.LogInfo(
+                $"[DeceptiveAI] '{Masked?.gameObject.name}': Late-night perma-aggression is active (10:00 PM). Denying transition to {next} — mimic remains in AmbushStrike!");
+            return;
+        }
+
         if (CurrentPhase == next && Time.time - _phaseEnteredTime < 1.0f) return;
 
         MimicPhase previous = CurrentPhase;
@@ -271,6 +307,10 @@ public class PhoneyDeceptiveAI : MonoBehaviour
         _phaseEnteredTime = Time.time;
 
         if (Masked == null) return;
+
+        Masked.StopSearch(Masked.searchForPlayers);
+        Masked.StopSearch(Masked.currentSearch);
+
         bool isServer = NetworkManager.Singleton?.IsServer == true || NetworkManager.Singleton?.IsHost == true;
 
         switch (next)
@@ -311,7 +351,7 @@ public class PhoneyDeceptiveAI : MonoBehaviour
 
                 // Reset paranoia timer & hostility back to initial cycle
                 _isHostilePrimed = false;
-                _hostilityChance = Mathf.Clamp01(Mathf.Max(0.40f, PhoneyPlugin.InitialHostilityChance.Value));
+                _hostilityChance = Mathf.Clamp01(Mathf.Max(0.45f, PhoneyPlugin.InitialHostilityChance.Value));
                 _nextParanoiaCheckTime = Time.time + PhoneyPlugin.ParanoiaIntervalSeconds.Value;
                 _lastParanoiaLogTime = Time.time;
 
@@ -388,6 +428,7 @@ public class PhoneyDeceptiveAI : MonoBehaviour
 
                 _ambushStamina = 1.0f;
                 _isAmbushBurst = false;
+                Masked.stunNormalizedTimer = -1f;
 
                 NavMeshUtil.SafeSetStopped(Masked.agent, false);
                 NavMeshUtil.SafeSetSpeed(Masked.agent, AmbushJogSpeed);
@@ -478,8 +519,29 @@ public class PhoneyDeceptiveAI : MonoBehaviour
             StartCoroutine(TraverseOffMeshLinkRoutine());
         }
 
+        // ── Late-Night Perma-Aggression (10:00 PM / 22:00 Moon Clock) ─────────
+        if (IsLateNightPermaAggressiveTime())
+        {
+            if (!_isLateNightPermaAggressive)
+            {
+                _isLateNightPermaAggressive = true;
+                PhoneyPlugin.Logger.LogInfo(
+                    $"[DeceptiveAI] '{Masked.gameObject.name}': 10:00 PM LATE NIGHT REACHED! Discarding disguise and entering PERMANENT AGGRESSIVE HUNT mode!");
+            }
+
+            if (CurrentPhase != MimicPhase.AmbushStrike)
+            {
+                PlayerControllerB? target = TargetPlayer != null && IsPlayerValidTarget(TargetPlayer, requireSameEnvironment: false)
+                    ? TargetPlayer
+                    : GetClosestLivingPlayer(out _);
+
+                TargetPlayer = target;
+                TransitionTo(MimicPhase.AmbushStrike);
+            }
+        }
+
         // ── Paranoia Escalation Timer (2-Minute Intervals) ────────────────────
-        if (CurrentPhase != MimicPhase.AmbushStrike && CurrentPhase != MimicPhase.TacticalRetreat)
+        if (!_isLateNightPermaAggressive && CurrentPhase != MimicPhase.AmbushStrike && CurrentPhase != MimicPhase.TacticalRetreat)
         {
             // Periodic countdown heartbeat log (every 30 seconds)
             if (Time.time >= _lastParanoiaLogTime + 30f)
@@ -881,8 +943,9 @@ public class PhoneyDeceptiveAI : MonoBehaviour
                 {
                     if (!_isSprinting)
                     {
-                        // Start sprinting if target is far enough away (> 2.0m), has stamina (> 0.20), not heavily burdened, not on breather, and moving
-                        if (distToDest > 2.0f && _stamina > 0.20f && !isHeavy && Time.time >= _sprintBreatherUntil && isMoving)
+                        // Start sprinting if target is far enough away (> 2.5m), has stamina (> 0.25), not heavily burdened, not on breather, moving, and has valid path!
+                        bool hasValidPath = Masked.agent.hasPath && !Masked.agent.pathPending && Masked.agent.pathStatus == NavMeshPathStatus.PathComplete;
+                        if (distToDest > 2.5f && _stamina > 0.25f && !isHeavy && Time.time >= _sprintBreatherUntil && isMoving && hasValidPath)
                         {
                             _isSprinting = true;
                             _sprintBurstEndTime = Time.time + UnityEngine.Random.Range(3.5f, 6.5f);
@@ -897,7 +960,7 @@ public class PhoneyDeceptiveAI : MonoBehaviour
                             // If burst ended naturally and still traveling to a distant destination, take a short breather walk
                             if (distToDest > 3.0f && _stamina > 0.15f)
                             {
-                                _sprintBreatherUntil = Time.time + UnityEngine.Random.Range(0.6f, 1.2f);
+                                _sprintBreatherUntil = Time.time + UnityEngine.Random.Range(0.8f, 1.4f);
                             }
                         }
                     }
@@ -931,7 +994,12 @@ public class PhoneyDeceptiveAI : MonoBehaviour
         // Enforce Running animation flag and client RPC synchronization
         if (CurrentPhase != MimicPhase.AmbushStrike)
         {
-            bool moving = Masked.agent.velocity.sqrMagnitude > 0.20f && !Masked.agent.isStopped;
+            // Use hysteresis to prevent rapid animation / RPC toggling:
+            // SqrMagnitude > 0.25f to start running, SqrMagnitude > 0.08f to maintain running
+            bool moving = _lastSyncedRunning
+                ? (Masked.agent.velocity.sqrMagnitude > 0.08f && !Masked.agent.isStopped)
+                : (Masked.agent.velocity.sqrMagnitude > 0.25f && !Masked.agent.isStopped);
+
             bool shouldRun = (isServer ? _isSprinting : _networkSyncedRunning) && moving && !_performingCrouch && !_isPickingUpScrap;
 
             Masked.running = shouldRun;
@@ -1121,8 +1189,52 @@ public class PhoneyDeceptiveAI : MonoBehaviour
         }
 
         // Head toward the player until we are back inside their companion band.
-        SetDestinationSafe(player.transform.position);
-        UpdateStaminaAndSpeed(player.transform.position);
+        bool playerInShip = MaskedScrapManager.IsPlayerInShip(player);
+        bool mimicInShip = MaskedScrapManager.IsEnemyInShip(Masked);
+        bool mimicAtEntrance = MaskedScrapManager.IsEnemyAtShipEntrance(Masked);
+        bool mimicUnderShip = MaskedScrapManager.IsPositionUnderShip(transform.position);
+
+        Vector3 targetNavPos = player.transform.position;
+        if (playerInShip && !mimicInShip && !mimicAtEntrance)
+        {
+            Vector3 entrance = MaskedScrapManager.GetShipEntrancePosition();
+            if (entrance != Vector3.zero)
+            {
+                targetNavPos = entrance;
+            }
+
+            if (mimicUnderShip)
+            {
+                if (_underShipStuckTimer == 0f)
+                {
+                    _underShipStuckTimer = Time.time;
+                }
+                else if (Time.time - _underShipStuckTimer > 1.5f && entrance != Vector3.zero)
+                {
+                    PhoneyPlugin.Logger.LogInfo(
+                        $"[DeceptiveAI] '{Masked!.gameObject.name}' stuck under ship geometry while seeking player. Emergency warp onto ship catwalk ramp!");
+                    NavMeshUtil.SafeWarp(Masked.agent, entrance);
+                    _underShipStuckTimer = 0f;
+                }
+            }
+            else
+            {
+                _underShipStuckTimer = 0f;
+            }
+        }
+        else
+        {
+            _underShipStuckTimer = 0f;
+        }
+
+        SetDestinationSafe(targetNavPos);
+        UpdateStaminaAndSpeed(targetNavPos);
+
+        if (playerInShip && !mimicInShip && !mimicAtEntrance)
+        {
+            // Still heading up the ramp to the ship entrance door; don't trigger greeting or stop yet!
+            return;
+        }
 
         if (_isHostilePrimed)
         {
@@ -1251,11 +1363,22 @@ public class PhoneyDeceptiveAI : MonoBehaviour
 
         // Anti-ship camping/getting stuck: if outside and near or inside the ship (and not actively hauling loot to the ship),
         // real crewmates NEVER loiter in the ship next to the terminal; they return into the facility to loot!
-        if (Masked != null && Masked.isOutside && MaskedScrapManager.IsNearShip(transform.position, 7.5f) && _deliveryPlan != ScrapDeliveryPlan.HaulToShip)
+        // NOTE: Only return to facility if our companion player is NOT currently in the ship!
+        if (Masked != null && Masked.isOutside && MaskedScrapManager.IsNearShip(transform.position, 7.5f)
+            && _deliveryPlan != ScrapDeliveryPlan.HaulToShip
+            && (player == null || !MaskedScrapManager.IsPlayerInShip(player)))
         {
             SetSubState(UndercoverSubState.ReturningToFacility, "Near ship outside, heading back to facility entrance");
             var outDoor = MaskedScrapManager.FindDoor(wantEntranceToBuilding: true);
             if (outDoor != null) SetDestinationSafe(MaskedScrapManager.GetDoorPosition(outDoor));
+            return;
+        }
+
+        // If companion player is inside the ship and mimic is outside/not in ship, seek them in the ship!
+        if (player != null && MaskedScrapManager.IsPlayerInShip(player) && !MaskedScrapManager.IsEnemyInShip(Masked) && !MaskedScrapManager.IsEnemyAtShipEntrance(Masked))
+        {
+            SetSubState(UndercoverSubState.SeekingPlayer, "Companion player is inside ship, joining them in ship");
+            SetDestinationSafe(MaskedScrapManager.GetShipEntrancePosition());
             return;
         }
 
@@ -1532,63 +1655,36 @@ public class PhoneyDeceptiveAI : MonoBehaviour
 
             var interiorDoor = MaskedScrapManager.FindDoor(wantEntranceToBuilding: false);
             Vector3 doorNavPos = interiorDoor != null ? MaskedScrapManager.GetDoorNavPosition(interiorDoor) : _scrapDropTarget;
-            Vector3 doorInteractPos = interiorDoor != null ? MaskedScrapManager.GetDoorInteractPosition(interiorDoor) : doorNavPos;
 
             UpdateStaminaAndSpeed(doorNavPos);
             float distToDoor = Vector3.Distance(transform.position, doorNavPos);
 
-            if (distToDoor <= 4.0f && interiorDoor != null)
+            bool arrivedAtDoor = distToDoor <= 2.2f || (Masked.agent != null && Masked.agent.isOnNavMesh && !Masked.agent.pathPending && Masked.agent.remainingDistance <= 1.2f);
+            if (arrivedAtDoor)
             {
-                Masked.stareAtTransform = null;
-                Masked.LookAtPosition(doorInteractPos, 0.6f);
-            }
-
-            bool arrivedAtDoor = distToDoor <= 1.75f || (Masked.agent != null && Masked.agent.isOnNavMesh && !Masked.agent.pathPending && Masked.agent.remainingDistance <= 1.0f);
-            if (arrivedAtDoor && interiorDoor != null && !_isUsingDoor && Time.time - _lastDoorTransitionTime > 4.5f)
-            {
-                StartCoroutine(DoorTransitionRoutine(interiorDoor, toOutside: true, onComplete: () =>
+                // Real player behavior: stash and pile loot inside the facility directly beside the main entrance door!
+                // Never exit the facility to drop scrap.
+                Vector3 dropPos = transform.position + transform.forward * 0.6f;
+                if (interiorDoor != null)
                 {
-                    // Now outside: choose our delivery plan!
-                    // Real players drop loot right outside the door (catwalk/landing) to quickly head back in.
-                    // Haul to ship is ONLY allowed late in the day (after 3:30 PM, normalizedTimeOfDay >= 0.55f),
-                    // and even then at a low chance (max 15-18%). Early/mid day, real players NEVER haul to ship individually.
-                    bool isLateInDay = IsLateInExpeditionDay();
-                    float shipChance = isLateInDay ? Mathf.Clamp(PhoneyPlugin.HaulToShipChance.Value, 0.05f, 0.18f) : 0f;
-                    float disruptChance = 0.12f;
-                    float doorChance = Mathf.Max(0.10f, 1.0f - (shipChance + disruptChance));
-                    float roll = UnityEngine.Random.value;
+                    Transform t = interiorDoor.entrancePoint ?? interiorDoor.transform;
+                    Vector3 fwd = t.forward;
+                    fwd.y = 0;
+                    if (fwd != Vector3.zero) fwd.Normalize();
+                    else fwd = transform.forward;
+                    dropPos = doorNavPos + fwd * 1.0f;
+                }
 
-                    if (roll < doorChance)
-                    {
-                        // Option 1: Drop outside near the main entrance door on the catwalk landing
-                        _deliveryPlan = ScrapDeliveryPlan.DropAtOutsideDoor;
-                        var outDoor = MaskedScrapManager.FindDoor(wantEntranceToBuilding: true);
-                        _scrapDropTarget = MaskedScrapManager.GetOutsideDoorDropPosition(outDoor);
-                        if (_scrapDropTarget == Vector3.zero)
-                        {
-                            _scrapDropTarget = transform.position + transform.forward * 1.2f;
-                        }
-                        PhoneyPlugin.Logger.LogInfo($"[DeceptiveAI] '{Masked.gameObject.name}' stepped outside! Delivery plan: DropAtOutsideDoor at {_scrapDropTarget} (isLateInDay={isLateInDay})");
-                    }
-                    else if (isLateInDay && roll < doorChance + shipChance)
-                    {
-                        // Option 2: Haul all the way to the Ship (LATE IN THE DAY ONLY)!
-                        _deliveryPlan = ScrapDeliveryPlan.HaulToShip;
-                        _scrapDropTarget = StartOfRound.Instance?.shipDoorAudioSource != null
-                            ? StartOfRound.Instance.shipDoorAudioSource.transform.position
-                            : transform.position;
-                        PhoneyPlugin.Logger.LogInfo($"[DeceptiveAI] '{Masked.gameObject.name}' stepped outside! Delivery plan: HaulToShip (late in day, normalizedTime={TimeOfDay.Instance?.normalizedTimeOfDay:P0})");
-                    }
-                    else
-                    {
-                        // Option 3: Drop somewhere random outside to disrupt the crew!
-                        _deliveryPlan = ScrapDeliveryPlan.DisruptRandomDrop;
-                        _scrapDropTarget = PickRandomDisruptNode();
-                        PhoneyPlugin.Logger.LogInfo($"[DeceptiveAI] '{Masked.gameObject.name}' stepped outside! Delivery plan: DisruptRandomDrop at {_scrapDropTarget}");
-                    }
+                _scrapManager?.DropRealScrap(dropPos);
+                if (!_performingCrouch) StartFriendlyCrouch();
 
-                    SetDestinationSafe(_scrapDropTarget);
-                }));
+                PhoneyPlugin.Logger.LogInfo(
+                    $"[DeceptiveAI] '{Masked.gameObject.name}' dropped hauled scrap INSIDE at facility door at {dropPos}! Returning to explore facility.");
+
+                SetSubState(UndercoverSubState.SearchingRooms, "Dropped loot inside entrance door, resuming search");
+                PickRoomNearPlayer(player);
+                SetDestinationSafe(_currentRoomTarget);
+                return;
             }
             else
             {
@@ -1718,9 +1814,15 @@ public class PhoneyDeceptiveAI : MonoBehaviour
             StartCoroutine(DoorTransitionRoutine(outsideDoor, toOutside: false, onComplete: () =>
             {
                 SetSubState(UndercoverSubState.SearchingRooms, "Returned through door into facility");
+                TargetPlayer = GetClosestLivingPlayer(out _, requireSameEnvironment: true) ?? GetClosestLivingPlayer(out _);
                 PickRoomNearPlayer(TargetPlayer);
                 SetDestinationSafe(_currentRoomTarget);
-                PhoneyPlugin.Logger.LogInfo($"[DeceptiveAI] '{Masked.gameObject.name}' returned through door into facility! Searching rooms.");
+                if (Masked?.agent != null)
+                {
+                    NavMeshUtil.SafeSetStopped(Masked.agent, false);
+                    NavMeshUtil.SafeSetSpeed(Masked.agent, WalkSpeed);
+                }
+                PhoneyPlugin.Logger.LogInfo($"[DeceptiveAI] '{Masked?.gameObject.name}' returned through door into facility! Roaming near '{(TargetPlayer != null ? TargetPlayer.playerUsername : "interior")}': {_currentRoomTarget}");
 
                 // In Mineshaft, if returning inside and we are on the upper entrance floor, ride elevator down into mine!
                 if (IsMineshaftDungeon() && IsOnMineshaftUpperFloor())
@@ -1821,7 +1923,9 @@ public class PhoneyDeceptiveAI : MonoBehaviour
 
         if (door.exitScript == null) door.FindExitPoint();
 
-        var exitDoor = door.exitScript ?? MaskedScrapManager.FindDoor(toOutside);
+        var exitDoor = (door.isEntranceToBuilding == toOutside)
+            ? door
+            : (door.exitScript ?? MaskedScrapManager.FindDoor(toOutside) ?? door);
         Vector3 safeExitPos = MaskedScrapManager.GetSafeDoorExitPosition(door, toOutside);
 
         Transform targetPoint = exitDoor != null && exitDoor.entrancePoint != null
@@ -1872,6 +1976,9 @@ public class PhoneyDeceptiveAI : MonoBehaviour
 
         Masked.SetEnemyOutside(toOutside);
 
+        Masked.StopSearch(Masked.searchForPlayers);
+        Masked.StopSearch(Masked.currentSearch);
+
         // Update held scrap status if carrying any
         if (_scrapManager != null)
         {
@@ -1885,7 +1992,48 @@ public class PhoneyDeceptiveAI : MonoBehaviour
             }
         }
 
+        OnTeleportedThroughDoor(safeExitPos, toOutside);
+
         PhoneyPlugin.Logger.LogInfo($"[Door] '{Masked.gameObject.name}' stepped through door → toOutside={toOutside} at {safeExitPos} (facing: {forwardDir}, isOnNavMesh={Masked.agent?.isOnNavMesh})");
+    }
+
+    /// <summary>
+    /// Cleanly resets navigation destination, sprint state, and stamina when teleporting across environments.
+    /// Prevents stutter-sprinting caused by stale destinations across different NavMeshes.
+    /// </summary>
+    public void OnTeleportedThroughDoor(Vector3 safeExitPos, bool toOutside)
+    {
+        _isUsingDoor = false;
+        _isSprinting = false;
+        _lastSyncedRunning = false;
+        _stamina = 1.0f;
+        _sprintBreatherUntil = Time.time + 1.2f; // 1.2s of clean walking before sprint can engage
+
+        _hasNavDestination = false;
+        _currentNavDestination = safeExitPos;
+
+        if (Masked != null)
+        {
+            Masked.destination = safeExitPos;
+            Masked.running = false;
+            if (Masked.creatureAnimator != null)
+            {
+                Masked.creatureAnimator.SetBool("Running", false);
+            }
+            if (NetworkManager.Singleton?.IsServer == true || NetworkManager.Singleton?.IsHost == true)
+            {
+                Masked.SetRunningClientRpc(false);
+            }
+
+            if (Masked.agent != null && Masked.agent.isOnNavMesh)
+            {
+                Masked.agent.ResetPath();
+                NavMeshUtil.SafeSetStopped(Masked.agent, false);
+                NavMeshUtil.SafeSetSpeed(Masked.agent, WalkSpeed);
+            }
+        }
+
+        PhoneyPlugin.Logger.LogInfo($"[DeceptiveAI] '{Masked?.gameObject.name}' OnTeleportedThroughDoor: cleared stale nav destination and reset sprint state.");
     }
 
     private IEnumerator DoorTransitionRoutine(EntranceTeleport door, bool toOutside, Action onComplete)
@@ -1903,15 +2051,15 @@ public class PhoneyDeceptiveAI : MonoBehaviour
         PhoneyPlugin.Logger.LogInfo(
             $"[Door] '{Masked.gameObject.name}' approaching door '{door.gameObject.name}' (distance: {distToNav:F2}m, toOutside: {toOutside}, aggressive={isAggressive}). Initiating interaction.");
 
-        // Walk directly towards doorNavPos until within reach (<= 1.35m) or path completed
-        if (distToNav > 1.35f && Masked.agent != null && Masked.agent.isOnNavMesh)
+        // Walk directly towards doorNavPos until within reach (<= 1.6m) or path completed
+        if (distToNav > 1.6f && Masked.agent != null && Masked.agent.isOnNavMesh)
         {
             SetDestinationSafe(doorNavPos);
             NavMeshUtil.SafeSetStopped(Masked.agent, false);
             NavMeshUtil.SafeSetSpeed(Masked.agent, isAggressive ? AmbushSprintSpeed : WalkSpeed);
-            float approachTimeout = isAggressive ? 1.5f : 3.5f;
+            float approachTimeout = isAggressive ? 1.5f : 3.0f;
             float elapsedApproach = 0f;
-            while (Vector3.Distance(transform.position, doorNavPos) > 1.35f && elapsedApproach < approachTimeout)
+            while (Vector3.Distance(transform.position, doorNavPos) > 1.6f && elapsedApproach < approachTimeout)
             {
                 if (Masked == null || Masked.isEnemyDead)
                 {
@@ -1939,39 +2087,8 @@ public class PhoneyDeceptiveAI : MonoBehaviour
             NavMeshUtil.SafeSetSpeed(Masked.agent, 0f);
         }
 
-        // 1. Turn smoothly to face the door handle / threshold
-        float turnTime = isAggressive ? 0.08f : 0.35f;
-        float elapsedTurn = 0f;
-        PhoneyPlugin.Logger.LogInfo($"[Door] '{Masked.gameObject.name}' turning to face door handle at {doorInteractPos} (turn time: {turnTime:F2}s).");
-        while (elapsedTurn < turnTime)
-        {
-            if (Masked == null || Masked.isEnemyDead)
-            {
-                _lastDoorTransitionTime = Time.time;
-                _isUsingDoor = false;
-                DoorInteractionTarget = Vector3.zero;
-                PhoneyNetworkManager.Instance.SyncDoorInteraction(Masked, Vector3.zero, false);
-                yield break;
-            }
-            elapsedTurn += Time.deltaTime;
-            Masked.stareAtTransform = null;
-            Masked.LookAtPosition(doorInteractPos, 0.5f);
-            Vector3 lookDir = (doorInteractPos - transform.position).normalized;
-            lookDir.y = 0;
-            if (lookDir != Vector3.zero)
-            {
-                transform.rotation = Quaternion.Slerp(transform.rotation, Quaternion.LookRotation(lookDir), Time.deltaTime * 20f);
-            }
-            yield return null;
-        }
-
-        // 2. Realistic player interact hold delay:
-        // Undercover: 1.0s - 1.3s hold with creak open.
-        // Aggressive: 0.15s instant burst through!
-        float holdDuration = isAggressive ? 0.15f : UnityEngine.Random.Range(1.0f, 1.3f);
-        float elapsedHold = 0f;
-        PhoneyPlugin.Logger.LogInfo($"[Door] '{Masked.gameObject.name}' holding door handle (hold duration: {holdDuration:F2}s, aggressive={isAggressive})...");
-
+        // Instant door opening interaction (no 1-2s stare delay!):
+        // Start opening entrance door immediately
         try
         {
             door.StartOpeningEntrance();
@@ -1981,30 +2098,20 @@ public class PhoneyDeceptiveAI : MonoBehaviour
             PhoneyPlugin.Logger.LogDebug($"[Door] StartOpeningEntrance caught: {ex.Message}");
         }
 
-        while (elapsedHold < holdDuration)
+        // Very brief 0.05s pause for animation/audio trigger to initiate
+        yield return new WaitForSeconds(0.05f);
+
+        if (Masked == null || Masked.isEnemyDead)
         {
-            if (Masked == null || Masked.isEnemyDead)
-            {
-                try { door.FinishOpeningEntrance(); } catch { }
-                _lastDoorTransitionTime = Time.time;
-                _isUsingDoor = false;
-                DoorInteractionTarget = Vector3.zero;
-                PhoneyNetworkManager.Instance.SyncDoorInteraction(Masked, Vector3.zero, false);
-                yield break;
-            }
-            elapsedHold += Time.deltaTime;
-            Masked.stareAtTransform = null;
-            Masked.LookAtPosition(doorInteractPos, 0.5f);
-            Vector3 lookDir = (doorInteractPos - transform.position).normalized;
-            lookDir.y = 0;
-            if (lookDir != Vector3.zero)
-            {
-                transform.rotation = Quaternion.LookRotation(lookDir);
-            }
-            yield return null;
+            try { door.FinishOpeningEntrance(); } catch { }
+            _lastDoorTransitionTime = Time.time;
+            _isUsingDoor = false;
+            DoorInteractionTarget = Vector3.zero;
+            PhoneyNetworkManager.Instance.SyncDoorInteraction(Masked, Vector3.zero, false);
+            yield break;
         }
 
-        // 3. Complete door opening animation & sound
+        // Complete door opening animation & sound
         PhoneyPlugin.Logger.LogInfo($"[Door] '{Masked.gameObject.name}' finishing door opening transition.");
         try
         {
@@ -2017,17 +2124,13 @@ public class PhoneyDeceptiveAI : MonoBehaviour
             try { door.PlayAudioAtTeleportPositions(); } catch { }
         }
 
-        // 4. Perform the teleport through the door
+        // Perform the teleport through the door
         DoorInteractionTarget = Vector3.zero;
         TeleportThroughDoor(door, toOutside);
 
-        // 5. Brief post-door pause (0.1s aggressive, 0.35s undercover)
-        yield return new WaitForSeconds(isAggressive ? 0.1f : 0.35f);
+        // Immediate post-door resume
+        yield return new WaitForSeconds(0.05f);
 
-        if (Masked?.agent != null)
-        {
-            NavMeshUtil.SafeSetStopped(Masked.agent, false);
-        }
         _lastDoorTransitionTime = Time.time;
         _isUsingDoor = false;
         DoorInteractionTarget = Vector3.zero;
@@ -2642,6 +2745,17 @@ public class PhoneyDeceptiveAI : MonoBehaviour
             TargetPlayer = GetClosestLivingPlayer(out _);
             if (TargetPlayer == null)
             {
+                if (IsLateNightPermaAggressiveTime())
+                {
+                    // Late night: remain in aggressive hunt! Patrol towards ship entrance where survivors extract
+                    Vector3 shipPos = MaskedScrapManager.GetShipEntrancePosition();
+                    if (shipPos != Vector3.zero)
+                    {
+                        SetDestinationSafe(shipPos);
+                    }
+                    return;
+                }
+
                 TransitionTo(MimicPhase.UndercoverLooting);
                 return;
             }
@@ -2726,6 +2840,21 @@ public class PhoneyDeceptiveAI : MonoBehaviour
             float crossTime = Time.time - _lastSeenPlayerTime;
             if (crossTime >= 35.0f)
             {
+                if (IsLateNightPermaAggressiveTime())
+                {
+                    // In late night, don't give up and re-disguise! Switch to any player on current side
+                    var sameEnvPlayer = GetClosestLivingPlayer(out _, requireSameEnvironment: true);
+                    if (sameEnvPlayer != null)
+                    {
+                        TargetPlayer = sameEnvPlayer;
+                        _lastSeenPlayerTime = Time.time;
+                        return;
+                    }
+                    // Otherwise keep door pursuit active
+                    _lastSeenPlayerTime = Time.time;
+                    return;
+                }
+
                 PhoneyPlugin.Logger.LogInfo(
                     $"[Pursuit] '{Masked.gameObject.name}': Player '{TargetPlayer.playerUsername}' escaped through door and mimic couldn't follow in time ({crossTime:F1}s >= 35s). Giving up.");
                 Masked.targetPlayer = null;
@@ -2737,16 +2866,70 @@ public class PhoneyDeceptiveAI : MonoBehaviour
             return; // Don't run same-side pursuit while navigating to door
         }
 
-        // ── Same-Side Pursuit ────────────────────────────────────────────────
+        // ── Same-Side Pursuit & Ship Ingress ──────────────────────────────────
         Masked.currentBehaviourStateIndex = 0;
         Masked.stopAndStareTimer = -999f;
-        Masked.targetPlayer = TargetPlayer;
-        Masked.movingTowardsTargetPlayer = true;
 
-        Masked.SetMovingTowardsTargetPlayer(TargetPlayer);
-        Masked.SetDestinationToPosition(TargetPlayer.transform.position);
+        bool targetInShip = MaskedScrapManager.IsPlayerInShip(TargetPlayer);
+        bool mimicInShip = MaskedScrapManager.IsEnemyInShip(Masked);
+        bool mimicAtEntrance = MaskedScrapManager.IsEnemyAtShipEntrance(Masked);
+        bool mimicUnderShip = MaskedScrapManager.IsPositionUnderShip(transform.position);
 
-        float dist    = Vector3.Distance(transform.position, TargetPlayer.transform.position);
+        Vector3 pursuitDest = TargetPlayer.transform.position;
+        float dist;
+
+        if (targetInShip && !mimicInShip && !mimicAtEntrance)
+        {
+            // Target is inside the ship, but mimic is outside on the ground or under the hull!
+            // Route through the ship entrance ramp / doorway.
+            Vector3 entrancePos = MaskedScrapManager.GetShipEntrancePosition();
+            if (entrancePos != Vector3.zero)
+            {
+                pursuitDest = entrancePos;
+            }
+
+            // Anti-under-ship geometry stuck escape:
+            if (mimicUnderShip)
+            {
+                if (_underShipStuckTimer == 0f)
+                {
+                    _underShipStuckTimer = Time.time;
+                }
+                else if (Time.time - _underShipStuckTimer > 1.25f && entrancePos != Vector3.zero)
+                {
+                    PhoneyPlugin.Logger.LogInfo(
+                        $"[Pursuit] '{Masked.gameObject.name}' trapped under ship geometry ({Time.time - _underShipStuckTimer:F1}s). Emergency warp onto ship catwalk ramp!");
+                    NavMeshUtil.SafeWarp(Masked.agent, entrancePos);
+                    _underShipStuckTimer = 0f;
+                }
+            }
+            else
+            {
+                _underShipStuckTimer = 0f;
+            }
+
+            Masked.targetPlayer = null;
+            Masked.movingTowardsTargetPlayer = false;
+            SetDestinationSafe(pursuitDest);
+
+            // True path distance for pursuit stamina/ranges (avoid 2m under-ship false distance)
+            dist = Vector3.Distance(transform.position, pursuitDest) + (entrancePos != Vector3.zero ? Vector3.Distance(entrancePos, TargetPlayer.transform.position) : 0f);
+
+            // If arrived at entrance doorway, log transition
+            if (entrancePos != Vector3.zero && Vector3.Distance(transform.position, entrancePos) <= 2.2f)
+            {
+                PhoneyPlugin.Logger.LogInfo(
+                    $"[Pursuit] '{Masked.gameObject.name}' reached ship entrance threshold! Charging into ship cabin after '{TargetPlayer.playerUsername}'.");
+            }
+        }
+        else
+        {
+            _underShipStuckTimer = 0f;
+            Masked.targetPlayer = TargetPlayer;
+            Masked.movingTowardsTargetPlayer = false; // Phoney controls destination; avoid vanilla overwriting to ground
+            SetDestinationSafe(pursuitDest);
+            dist = Vector3.Distance(transform.position, TargetPlayer.transform.position);
+        }
         float elapsed = Time.time - _phaseEnteredTime;
         bool isServer = NetworkManager.Singleton?.IsServer == true || NetworkManager.Singleton?.IsHost == true;
 
@@ -2918,6 +3101,29 @@ public class PhoneyDeceptiveAI : MonoBehaviour
 
         if (lostLOSLongEnough || brokenAway || extremeDistance)
         {
+            if (IsLateNightPermaAggressiveTime())
+            {
+                // Late night perma-aggression: NEVER give up pursuit, NEVER re-disguise!
+                // Attempt to acquire any other living crewmate:
+                var anyOther = GetClosestLivingPlayer(out float anyDist, requireSameEnvironment: false);
+                if (anyOther != null && anyOther != TargetPlayer)
+                {
+                    PhoneyPlugin.Logger.LogInfo(
+                        $"[Pursuit] '{Masked.gameObject.name}': Primary target lost in late night ({timeWithoutLOS:F1}s), retargeting living crewmate '{anyOther.playerUsername}' (dist: {anyDist:F1}m)!");
+                    TargetPlayer = anyOther;
+                    _lastSeenPlayerTime = Time.time;
+                    _hadLOSLastFrame = true;
+                    return;
+                }
+                // No alternative target: continue hunting toward last known player location or the ship entrance
+                Vector3 shipPos = MaskedScrapManager.GetShipEntrancePosition();
+                if (shipPos != Vector3.zero)
+                {
+                    SetDestinationSafe(shipPos);
+                }
+                return;
+            }
+
             string escapeReason = lostLOSLongEnough ? $"LOS broken continuously for {timeWithoutLOS:F1}s >= {timeout:F1}s" :
                                  (brokenAway ? $"Player escaped beyond pursuit range ({dist:F1}m > {maxRange:F1}m) and hidden for {timeWithoutLOS:F1}s >= 10.0s" :
                                  $"Extreme distance ({dist:F1}m > {(Masked.isOutside ? 160 : 100)}m)");
@@ -2947,6 +3153,12 @@ public class PhoneyDeceptiveAI : MonoBehaviour
     private void UpdateRetreat()
     {
         if (Masked == null) return;
+
+        if (IsLateNightPermaAggressiveTime())
+        {
+            TransitionTo(MimicPhase.AmbushStrike);
+            return;
+        }
 
         if (Masked.isOutside)
         {
@@ -3163,6 +3375,14 @@ public class PhoneyDeceptiveAI : MonoBehaviour
     public float LeashDistance(PlayerControllerB? player)
     {
         if (player == null || Masked == null) return float.MaxValue;
+        if (MaskedScrapManager.IsPlayerInShip(player) && !MaskedScrapManager.IsEnemyInShip(Masked) && !MaskedScrapManager.IsEnemyAtShipEntrance(Masked))
+        {
+            Vector3 entrance = MaskedScrapManager.GetShipEntrancePosition();
+            if (entrance != Vector3.zero)
+            {
+                return Vector3.Distance(transform.position, entrance) + Vector3.Distance(entrance, player.transform.position);
+            }
+        }
         return Vector3.Distance(transform.position, player.transform.position);
     }
 
@@ -3248,6 +3468,22 @@ public class PhoneyDeceptiveAI : MonoBehaviour
         reason = string.Empty;
         if (target == null || target.isPlayerDead || Masked == null) return false;
         if (!IsSameEnvironment(target)) return false;
+
+        // Ship separation guard: if target is in ship but mimic is outside and not at entrance doorway,
+        // they are separated by ship elevation / hull — not in proximity for ambush!
+        bool targetInShip = MaskedScrapManager.IsPlayerInShip(target);
+        bool mimicInShip = MaskedScrapManager.IsEnemyInShip(Masked);
+        bool mimicAtEntrance = MaskedScrapManager.IsEnemyAtShipEntrance(Masked);
+        if (targetInShip && !mimicInShip && !mimicAtEntrance)
+        {
+            return false;
+        }
+
+        // Mimic is underneath the ship belly: strictly cannot ambush
+        if (MaskedScrapManager.IsPositionUnderShip(transform.position))
+        {
+            return false;
+        }
 
         float dist = Vector3.Distance(transform.position, target.transform.position);
         float aggroRange = PhoneyPlugin.AmbushDistanceThreshold != null 
@@ -3357,6 +3593,7 @@ public class PhoneyDeceptiveAI : MonoBehaviour
     private bool HasLineOfSight(PlayerControllerB player)
     {
         if (player == null || Masked == null) return false;
+        if (MaskedScrapManager.IsPositionUnderShip(transform.position)) return false;
         Vector3 eyePos = transform.position + Vector3.up * 1.5f;
         Vector3 playerPos = player.transform.position + Vector3.up * 1.5f;
         return !Physics.Linecast(eyePos, playerPos, StartOfRound.Instance.collidersAndRoomMaskAndDefault);

@@ -334,7 +334,7 @@ public class PhoneyBloodyReveal : MonoBehaviour
         {
             _masked.creatureAnimator.SetBool("Stunned", false);
         }
-        _masked.stunNormalizedTimer = 0f;
+        _masked.stunNormalizedTimer = -1f;
 
         // Phase B: Release standstill into reaction window jog with hands raised
         // (Sprint bursts and stamina are regulated dynamically by PhoneyDeceptiveAI)

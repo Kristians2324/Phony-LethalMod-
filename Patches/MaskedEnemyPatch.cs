@@ -166,6 +166,9 @@ public class MaskedEnemyPatch
             __instance.SetHandsOutClientRpc(false);
         }
 
+        __instance.StopSearch(__instance.searchForPlayers);
+        __instance.StopSearch(__instance.currentSearch);
+
         PhoneyPlugin.Logger.LogInfo($"[MaskedPatch] SETUP COMPLETE for '{__instance.gameObject.name}' → impersonating '{targetPlayer.playerUsername}'");
         PhoneyPlugin.Logger.LogInfo("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     }
@@ -280,10 +283,17 @@ public class MaskedEnemyPatch
 
         __instance.timeAtLastUsingEntrance = Time.realtimeSinceStartup;
 
+        // Stop any running vanilla search routines immediately
+        if (__instance.searchCoroutine != null || __instance.currentSearch != null)
+        {
+            __instance.StopSearch(__instance.searchForPlayers);
+            __instance.StopSearch(__instance.currentSearch);
+        }
+
         Vector3 originalPos = pos;
         Vector3 safePos = originalPos;
 
-        // Find the matching door (Main Entrance or Fire Exit)
+        // Find the matching door (Main Entrance or Fire Exit) on the destination side
         EntranceTeleport? door = MaskedScrapManager.FindClosestDoor(originalPos, wantEntranceToBuilding: setOutside);
         door ??= RoundManager.FindMainEntranceScript(setOutside);
         door ??= MaskedScrapManager.FindDoor(wantEntranceToBuilding: setOutside);
@@ -306,7 +316,9 @@ public class MaskedEnemyPatch
         // Face mimic outward in door facing orientation
         if (door != null)
         {
-            Transform? t = door.exitScript?.entrancePoint ?? door.entrancePoint ?? door.transform;
+            Transform? t = (door.isEntranceToBuilding == setOutside)
+                ? (door.entrancePoint ?? door.transform)
+                : (door.exitScript?.entrancePoint ?? door.entrancePoint ?? door.transform);
             Vector3 fwd = t.forward;
             fwd.y = 0;
             if (fwd != Vector3.zero)
@@ -340,6 +352,17 @@ public class MaskedEnemyPatch
 
         __instance.serverPosition = safePos;
         __instance.SetEnemyOutside(setOutside);
+
+        // Ensure search routines remain stopped after SetEnemyOutside refreshes AI nodes
+        if (__instance.searchCoroutine != null || __instance.currentSearch != null)
+        {
+            __instance.StopSearch(__instance.searchForPlayers);
+            __instance.StopSearch(__instance.currentSearch);
+        }
+
+        // Notify PhoneyDeceptiveAI to reset stale nav destination, sprint, and stamina
+        var deceptiveAI = __instance.GetComponent<PhoneyDeceptiveAI>();
+        deceptiveAI?.OnTeleportedThroughDoor(safePos, setOutside);
 
         // Play door audio matching vanilla
         if (door != null && door.doorAudios != null && door.doorAudios.Length > 0 && door.entrancePointAudio != null)
@@ -551,6 +574,44 @@ public class MaskedEnemyPatch
         return true;
     }
 
+    // ─── Suppress Vanilla StartSearch for Phoney Mimics ──────────────────────
+
+    [HarmonyPatch(typeof(EnemyAI), "StartSearch")]
+    [HarmonyPrefix]
+    private static bool StartSearchPrefix(EnemyAI __instance)
+    {
+        if (__instance is MaskedPlayerEnemy && PhoneyPlugin.EnableDeceptiveAI.Value)
+        {
+            // Suppress vanilla search coroutine entirely for Phoney deceptive mimics!
+            // PhoneyDeceptiveAI drives all room searches, scrap hunting, and player pursuit.
+            // Leaving CurrentSearchCoroutine running causes infinite node-elimination error spam
+            // and fights Phoney for agent destination.
+            return false;
+        }
+        return true;
+    }
+
+    // ─── NavigateTowardsTargetPlayer (Suppress Vanilla Ship Ground Destination) ─
+
+    [HarmonyPatch(typeof(EnemyAI), "NavigateTowardsTargetPlayer")]
+    [HarmonyPrefix]
+    private static bool NavigateTowardsTargetPlayerPrefix(EnemyAI __instance)
+    {
+        if (__instance is MaskedPlayerEnemy && PhoneyPlugin.EnableDeceptiveAI.Value)
+        {
+            var ai = __instance.GetComponent<PhoneyDeceptiveAI>();
+            if (ai != null)
+            {
+                // Suppress vanilla NavigateTowardsTargetPlayer: vanilla calculates
+                // destination = new Vector3(targetPlayer.x, destination.y, targetPlayer.z),
+                // which corrupts destination to the ground underneath the ship when players are inside the ship.
+                // PhoneyDeceptiveAI handles all pursuit navigation, including catwalk ramp and ship ingress routing.
+                return false;
+            }
+        }
+        return true;
+    }
+
     // ─── DoAIInterval ─────────────────────────────────────────────────────────
 
     [HarmonyPatch("DoAIInterval")]
@@ -558,6 +619,12 @@ public class MaskedEnemyPatch
     private static bool DoAIIntervalPrefix(MaskedPlayerEnemy __instance)
     {
         if (__instance == null || !PhoneyPlugin.EnableDeceptiveAI.Value) return true;
+
+        if (__instance.searchCoroutine != null || __instance.currentSearch != null)
+        {
+            __instance.StopSearch(__instance.searchForPlayers);
+            __instance.StopSearch(__instance.currentSearch);
+        }
 
         if (__instance.elevatorScript == null)
         {
@@ -631,6 +698,38 @@ public class MaskedEnemyPatch
                 // so the player gets a jump-scare reaction window!
                 if (reveal.IsTransforming)
                 {
+                    return false;
+                }
+            }
+
+            var player = other.GetComponent<PlayerControllerB>()
+                         ?? other.GetComponentInParent<PlayerControllerB>();
+            if (player != null && !player.isPlayerDead && !__instance.inKillAnimation && !__instance.startingKillAnimationLocalClient)
+            {
+                // Verify they aren't separated by ship elevation / hull (e.g. mimic under ship, player inside)
+                bool targetInShip = MaskedScrapManager.IsPlayerInShip(player);
+                bool mimicInShip = MaskedScrapManager.IsEnemyInShip(__instance);
+                bool mimicAtEntrance = MaskedScrapManager.IsEnemyAtShipEntrance(__instance);
+                if (targetInShip && !mimicInShip && !mimicAtEntrance)
+                {
+                    PhoneyPlugin.Logger.LogInfo($"[MaskedPatch] OnCollideWithPlayer: Suppressing kill — '{player.playerUsername}' is inside ship, but mimic is outside/underneath.");
+                    return false;
+                }
+                if (MaskedScrapManager.IsPositionUnderShip(__instance.transform.position))
+                {
+                    PhoneyPlugin.Logger.LogInfo($"[MaskedPatch] OnCollideWithPlayer: Suppressing kill — mimic is physically underneath the ship belly.");
+                    return false;
+                }
+
+                // Ensure stunNormalizedTimer is negative so vanilla or direct kill isn't blocked
+                __instance.stunNormalizedTimer = -1f;
+
+                // If this is the local player or we are the host/owner, initiate kill animation!
+                if (player == GameNetworkManager.Instance?.localPlayerController || __instance.IsOwner || NetworkManager.Singleton?.IsServer == true)
+                {
+                    PhoneyPlugin.Logger.LogInfo($"[MaskedPatch] AmbushStrike lethal collision with '{player.playerUsername}'! Triggering kill animation.");
+                    __instance.startingKillAnimationLocalClient = true;
+                    __instance.KillPlayerAnimationServerRpc((int)player.playerClientId);
                     return false;
                 }
             }
